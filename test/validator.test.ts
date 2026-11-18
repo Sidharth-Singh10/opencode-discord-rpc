@@ -59,6 +59,16 @@ describe("M0 evidence validator", () => {
   test("accepts the complete positive fixture", () => {
     expectPass(fixture())
   })
+  test("invalid evidence diagnostics do not repeat private values or keys", () => {
+    const dir = fixture()
+    const secret = "/home/CRITIC_SECRET/file"
+    editJson(dir, "run.json", (run) => { run.host.version = secret; run.host[secret] = secret })
+    editJsonl(dir, "reference.jsonl", (records) => { records[0].type = secret })
+    editJsonl(dir, "publication.jsonl", (records) => { records[0].attempt = secret })
+    const result = runValidator(dir)
+    expect(result.code).not.toBe(0)
+    expect(result.output).not.toContain(secret)
+  })
 
   describe("mandatory documents", () => {
     expectFail("missing run.json", (dir) => rmSync(join(dir, "run.json")))
@@ -126,12 +136,70 @@ describe("M0 evidence validator", () => {
   })
 
   describe("publication provenance", () => {
+    expectFail("missing unknown-session refusal", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const kept = records.filter((record) => record.code !== "no-observed-session")
+        records.splice(0, records.length, ...kept)
+      }),
+    )
+    expectFail("a failure-phase record cannot masquerade as an ACK", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.phase === "acknowledged" && record.attempt === "command-publish").phase = "post-enqueue"
+      }),
+    )
+    expectFail("terminal payload differs from the authorized enqueue", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.phase === "enqueued" && record.attempt === "command-publish").activity.timestamps.start += 10
+      }),
+    )
+    expectFail("terminal session differs from the authorized enqueue", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.phase === "enqueued" && record.attempt === "command-publish").sessionHash = "cccccccccccccccc"
+      }),
+    )
+    expectFail("a clear enqueue cannot count as a publish ACK", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.phase === "acknowledged" && record.attempt === "disconnect-command").attempt = "command-publish"
+      }),
+    )
     expectFail("only one acknowledged publication", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
         const successes = records.filter((record) => record.attempt === "command-publish" && record.rpcOk === true)
         const first = successes[0]
         const kept = records.filter((record) => record.attempt !== "command-publish" || record.rpcOk !== true || record === first)
         records.splice(0, records.length, ...kept)
+      }),
+    )
+    expectFail("duplicate ACK records do not satisfy the five-write quota", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const terminal = records.find((record) => record.phase === "acknowledged" && record.attempt === "command-publish")
+        for (let i = 0; i < 4; i += 1) records.push({ ...terminal, at: new Date(Date.parse(terminal.at) + i + 1).toISOString() })
+        const kept = records.filter((record) => record.phase !== "acknowledged" || record === terminal || String(record.nonce) === String(terminal.nonce))
+        records.splice(0, records.length, ...kept)
+      }),
+    )
+    expectFail("missing second published session", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const second = records.filter((record) => record.sessionHash === "bbbbbbbbbbbbbbbb")
+        records.splice(0, records.length, ...records.filter((record) => !second.includes(record)))
+      }),
+    )
+    expectFail("missing unknown-identity refusal", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const kept = records.filter((record) => record.code !== "identity-unknown")
+        records.splice(0, records.length, ...kept)
+      }),
+    )
+    expectFail("unmatched terminal acknowledgment", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const enqueue = records.find((record) => record.phase === "enqueued" && record.attempt === "command-publish")
+        records.splice(records.indexOf(enqueue), 1)
+      }),
+    )
+    expectFail("contradictory terminal outcomes", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const terminal = records.find((record) => record.phase === "acknowledged" && record.attempt === "command-publish")
+        records.push({ ...terminal, phase: "post-enqueue", rpcOk: false, code: "rpc-timeout", evt: null })
       }),
     )
     expectFail("no same-session repeat", (dir) =>
@@ -195,13 +263,13 @@ describe("M0 evidence validator", () => {
   describe("ownership and fencing", () => {
     expectFail("publication before acquisition", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
-        records.find((record) => record.attempt === "command-publish" && record.rpcOk).at = new Date(1_750_000_000_000 - 1000).toISOString()
+        records.find((record) => record.attempt === "command-publish" && record.phase === "enqueued").at = new Date(1_750_000_000_000 - 1000).toISOString()
       }),
     )
     expectFail("publication after release", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
-        const target = records.filter((record) => record.attempt === "command-publish" && record.rpcOk && record.instanceId === "22222222-2222-4222-8222-222222222222")[0]
-        target.at = new Date(1_750_000_000_000 + 16_500).toISOString()
+        const target = records.filter((record) => record.attempt === "command-publish" && record.phase === "enqueued" && record.instanceId === "22222222-2222-4222-8222-222222222222")[0]
+        target.at = new Date(1_750_000_000_000 + 16_400).toISOString()
       }),
     )
     expectFail("clear before acquisition", (dir) =>
@@ -216,7 +284,7 @@ describe("M0 evidence validator", () => {
     )
     expectFail("publication after revocation", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
-        const record = records.find((entry) => entry.attempt === "command-publish" && entry.rpcOk && entry.instanceId === "11111111-1111-4111-8111-111111111111")
+        const record = records.find((entry) => entry.attempt === "command-publish" && entry.phase === "enqueued" && entry.instanceId === "11111111-1111-4111-8111-111111111111")
         record.at = new Date(1_750_000_000_000 + 10_500).toISOString()
       }),
     )
@@ -232,7 +300,7 @@ describe("M0 evidence validator", () => {
     )
     expectFail("refused operation that enqueued a nonce", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
-        const refused = records.find((record) => record.code === "not-owner")
+        const refused = records.find((record) => record.phase === "pre-enqueue" && record.code === "identity-unknown")
         refused.nonce = "77777777-7777-4777-8777-777777777777"
       }),
     )

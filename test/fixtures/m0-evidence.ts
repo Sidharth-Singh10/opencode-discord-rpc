@@ -119,7 +119,7 @@ function captureRecords(): { capture: Array<Record<string, unknown>>; reference:
       eventCreatedMs,
     })
   })
-  reference.push({ v: 1, seq: 999, atMs: baseMs + 500, source: "subscribe", instanceId: INSTANCE_A, type: "observer.error", code: "capture-listen-failed" })
+  reference.push({ v: 1, seq: 0, atMs: baseMs + 500, source: "subscribe", instanceId: INSTANCE_A, type: "observer.error", code: "capture-listen-failed" })
   return { capture, reference }
 }
 
@@ -171,7 +171,6 @@ function publisherEvents(): Array<Record<string, unknown>> {
 }
 
 function publicationRecords(): Array<Record<string, unknown>> {
-  const activity = buildActivity({ providerID: "opencode", id: "deepseek-v4.1-flash-free" }, seconds)
   const modelProvenance = {
     selected: { providerID: "opencode", id: "deepseek-v4.1-flash-free" },
     executed: { providerID: "opencode", id: "deepseek-v4.1-flash-free", variant: "default" },
@@ -180,47 +179,110 @@ function publicationRecords(): Array<Record<string, unknown>> {
     reportedCost: 0,
     tokens: { input: 100, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
   }
-  const provenance = (committed: boolean, anchorCommitted: boolean) => ({
-    seconds,
-    sourceField: "session.message.list[].type=user.time.created",
-    originalValue: createdMs,
-    originalUnits: "milliseconds since Unix epoch",
-    conversion: "floor(ms/1000)",
-    committed,
-    anchorCommitted,
-  })
-  const success = (instanceId: string, offset: number, fence: number, nonce: string, committed: boolean) => ({
+  const records: Array<Record<string, unknown>> = []
+  const enqueue = (instanceId: string, offset: number, fence: number, nonce: string, activity: boolean, sessionHash?: string): void => {
+    records.push({
+      v: 1,
+      at: at(offset),
+      instanceId,
+      pid: instanceId === A ? 4001 : 4002,
+      attempt: "command-publish",
+      phase: "enqueued",
+      live: true,
+      ...(sessionHash ? { sessionHash } : {}),
+      fence,
+      nonce,
+      cmd: "SET_ACTIVITY",
+      ...(activity ? { activity: buildActivity({ providerID: "opencode", id: "deepseek-v4.1-flash-free" }, seconds) } : {}),
+    })
+  }
+  const success = (instanceId: string, offset: number, fence: number, nonce: string, committed: boolean, sessionHash: string, startSeconds: number, sourceMs: number): void => {
+    const activity = buildActivity({ providerID: "opencode", id: "deepseek-v4.1-flash-free" }, startSeconds)
+    enqueue(instanceId, offset - 10, fence, nonce, true, sessionHash)
+    records[records.length - 1]!.activity = activity
+    records.push({
+      v: 1,
+      at: at(offset),
+      instanceId,
+      pid: instanceId === A ? 4001 : 4002,
+      attempt: "command-publish",
+      phase: "acknowledged",
+      live: true,
+      sessionHash,
+      selector: instanceId === A ? "route" : "event",
+      fence,
+      nonce,
+      cmd: "SET_ACTIVITY",
+      evt: null,
+      activity,
+      rpcOk: true,
+      durationMs: 5,
+      timestampProvenance: {
+        seconds: startSeconds,
+        sourceField: "session.message.list[].type=user.time.created",
+        originalValue: sourceMs,
+        originalUnits: "milliseconds since Unix epoch",
+        conversion: "floor(ms/1000)",
+        committed,
+        anchorCommitted: true,
+      },
+      modelProvenance,
+    })
+  }
+
+  records.push({ v: 1, at: at(3900), instanceId: A, pid: 4001, attempt: "ready", phase: "lifecycle", live: true, ready: true })
+  success(A, 4100, 3, "33333333-3333-4333-8333-333333333301", false, SESSION, seconds, createdMs)
+  success(A, 9000, 3, "33333333-3333-4333-8333-333333333302", true, SESSION, seconds, createdMs)
+  success(B, 10100, 4, "44444444-4444-4444-8444-444444444401", true, SESSION, seconds, createdMs)
+  success(B, 15000, 4, "44444444-4444-4444-8444-444444444402", true, SESSION, seconds, createdMs)
+
+  // Owner-authorized nonce-bearing RPC rejection: legitimate and not a success.
+  enqueue(B, 15100, 4, "44444444-4444-4444-8444-444444444403", true, SESSION)
+  records.push({
     v: 1,
-    at: at(offset),
-    instanceId,
-    pid: instanceId === A ? 4001 : 4002,
+    at: at(15200),
+    instanceId: B,
+    pid: 4002,
     attempt: "command-publish",
+    phase: "post-enqueue",
     live: true,
     sessionHash: SESSION,
-    selector: instanceId === A ? "route" : "event",
-    fence,
-    nonce,
+    fence: 4,
+    nonce: "44444444-4444-4444-8444-444444444403",
     cmd: "SET_ACTIVITY",
-    evt: null,
-    activity,
-    rpcOk: true,
+    evt: "ERROR",
+    rpcOk: false,
+    code: "rpc-rejected",
+    activity: buildActivity({ providerID: "opencode", id: "deepseek-v4.1-flash-free" }, seconds),
     durationMs: 5,
-    timestampProvenance: provenance(committed, true),
-    modelProvenance,
   })
-  return [
-    { v: 1, at: at(3900), instanceId: A, pid: 4001, attempt: "ready", live: true, ready: true },
-    success(A, 4100, 3, "33333333-3333-4333-8333-333333333301", false),
-    success(A, 9000, 3, "33333333-3333-4333-8333-333333333302", true),
-    success(B, 10100, 4, "44444444-4444-4444-8444-444444444401", true),
-    success(B, 15000, 4, "44444444-4444-4444-8444-444444444402", true),
-    { v: 1, at: at(15500), instanceId: B, pid: 4002, attempt: "disconnect-command", live: true, fence: 4, nonce: "55555555-5555-4555-8555-555555555501", cmd: "SET_ACTIVITY", evt: null, rpcOk: true },
-    { v: 1, at: at(16500), instanceId: B, pid: 4002, attempt: "socket-close", live: true, code: "socket-closed" },
-    { v: 1, at: at(16900), instanceId: B, pid: 4002, attempt: "ready", live: true, ready: true },
-    success(B, 17100, 5, "55555555-5555-4555-8555-555555555502", true),
-    { v: 1, at: at(21000), instanceId: B, pid: 4002, attempt: "cleanup", live: true, code: "cleanup" },
-    { v: 1, at: at(10200), instanceId: A, pid: 4001, attempt: "command-publish", live: true, code: "not-owner" },
-  ]
+
+  // Clear: enqueue + acknowledged terminal, no activity.
+  records.push({ v: 1, at: at(15400), instanceId: B, pid: 4002, attempt: "disconnect-command", phase: "enqueued", live: true, fence: 4, nonce: "55555555-5555-4555-8555-555555555501", cmd: "SET_ACTIVITY" })
+  records.push({ v: 1, at: at(15500), instanceId: B, pid: 4002, attempt: "disconnect-command", phase: "acknowledged", live: true, fence: 4, nonce: "55555555-5555-4555-8555-555555555501", cmd: "SET_ACTIVITY", evt: null, rpcOk: true })
+  records.push({ v: 1, at: at(16500), instanceId: B, pid: 4002, attempt: "socket-close", phase: "lifecycle", live: true, code: "socket-closed" })
+  records.push({ v: 1, at: at(16900), instanceId: B, pid: 4002, attempt: "ready", phase: "lifecycle", live: true, ready: true })
+
+  success(B, 17100, 5, "55555555-5555-4555-8555-555555555502", true, SESSION, seconds, createdMs)
+  const secondSeconds = seconds + 10
+  const secondMs = secondSeconds * 1000 + 123
+  success(B, 17500, 5, "55555555-5555-4555-8555-555555555503", false, "bbbbbbbbbbbbbbbb", secondSeconds, secondMs)
+  success(B, 21900, 5, "55555555-5555-4555-8555-555555555504", true, "bbbbbbbbbbbbbbbb", secondSeconds, secondMs)
+
+  // Unknown identity refuses publication before any anchor or enqueue.
+  records.push({
+    v: 1,
+    at: at(21950),
+    instanceId: B,
+    pid: 4002,
+    attempt: "command-publish",
+    phase: "pre-enqueue",
+    live: true,
+    code: "identity-unknown",
+  })
+  records.push({ v: 1, at: at(22000), instanceId: B, pid: 4002, attempt: "cleanup", phase: "lifecycle", live: true, code: "cleanup" })
+  records.push({ v: 1, at: at(21960), instanceId: B, pid: 4002, attempt: "command-publish", phase: "pre-enqueue", live: true, code: "no-observed-session" })
+  return records
 }
 
 export function makeEvidenceFixture(dir: string): void {

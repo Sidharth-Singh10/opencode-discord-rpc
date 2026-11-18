@@ -8,10 +8,12 @@
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 
 import { validateCaptureRecord, type CaptureRecord } from "../src/m0/capture.js"
 import type { CapturedEvent } from "../src/m0/capture.js"
 import { validateActivity } from "../src/discord/presence.js"
+import { sanitizePublication, sanitizePublisherEvent, sanitizeRun, safeIdentifier } from "../src/m0/sanitize.js"
 
 export interface ValidationResult {
   failures: string[]
@@ -30,14 +32,18 @@ const PUBLISHER_KINDS = new Set(["acquire", "renew", "takeover", "contended", "r
 const PUBLISHER_CODES = new Set(["store-unavailable", "closed", "contended", "acquire-failed", "renew-failed", "release-failed", "critical-failed"])
 const PUBLISHER_REASONS = new Set(["fence-changed", "owner-row-gone", "release-fence-mismatch", "fence-mismatch", "busy", "cleanup"])
 const ATTEMPTS = new Set(["ready", "socket-close", "socket-error", "command-publish", "disconnect-command", "disconnect", "revoked", "cleanup", "cleanup-close", "coordination-start"])
+const PHASES = new Set(["lifecycle", "pre-enqueue", "enqueued", "post-enqueue", "acknowledged"])
 const CODES = new Set([
   "live-disabled",
+  "identity-unknown",
   "no-coordinator",
   "no-observed-session",
   "session-unreadable",
   "executed-model-unknown",
   "timestamp-unavailable",
   "payload-invalid",
+  "anchor-conflict",
+  "anchor-persist-failed",
   "not-owner",
   "connect-failed",
   "enqueue-busy",
@@ -45,6 +51,7 @@ const CODES = new Set([
   "enqueue-revoked",
   "enqueue-no-store",
   "enqueue-error",
+  "enqueue-rejected",
   "rpc-rejected",
   "rpc-timeout",
   "rpc-closed",
@@ -117,7 +124,7 @@ export function validateEvidence(dir: string): ValidationResult {
     }
     const allowed = new Set([...required, ...optional])
     for (const key of required) if (!(key in value)) fail(`${name} is missing ${key}`)
-    for (const key of Object.keys(value)) if (!allowed.has(key)) fail(`${name} has unexpected key ${key}`)
+    for (const key of Object.keys(value)) if (!allowed.has(key)) fail(`${name} has an unexpected key`)
     return value
   }
 
@@ -164,6 +171,9 @@ export function validateEvidence(dir: string): ValidationResult {
     stringField(model, "id", name)
     stringField(model, "providerID", name)
     if ("variant" in model) stringField(model, "variant", name)
+    for (const key of ["id", "providerID", "variant"]) {
+      if (key in model && !safeIdentifier(model[key])) fail(`${name}.${key} is outside the M0 metadata vocabulary`)
+    }
   }
 
   function validateTokens(value: unknown, name: string): void {
@@ -210,7 +220,7 @@ export function validateEvidence(dir: string): ValidationResult {
       if (enrichment !== "refused") fail(`${name}: ${klass} identity allowed enrichment`)
       if (reason === "host-and-urls-match") fail(`${name}: ${klass} identity cannot claim a local match`)
     }
-    return klass && enrichment ? { class: klass, enrichment } : null
+    return klass && ["local", "remote", "unknown"].includes(klass) && enrichment && ["allowed", "refused"].includes(enrichment) ? { class: klass, enrichment } : null
   }
 
   function validateHost(value: unknown, name: string): void {
@@ -381,9 +391,11 @@ export function validateEvidence(dir: string): ValidationResult {
     if (!Array.isArray(coverage.notes) || coverage.notes.some((entry) => typeof entry !== "string")) fail("coverage.json.notes must be a string array")
   }
   const reloadValue = readJson("reload.json")
-  const reload = shape(reloadValue, "reload.json", ["reloadReranSetup"])
+  const reload = shape(reloadValue, "reload.json", ["reloadReranSetup"], ["method", "slashReloadReranSetup"])
   if (reload) {
     if (booleanField(reload, "reloadReranSetup", "reload.json") !== true) fail("reload.json did not record a setup re-run")
+    if (reload.method !== undefined && !["tui-restart", "slash-reload"].includes(String(reload.method))) fail("reload.json.method has an invalid enum")
+    if (reload.slashReloadReranSetup !== undefined) booleanField(reload, "slashReloadReranSetup", "reload.json")
   }
 
   // ---------------------------------------------------------------- canaries
@@ -400,7 +412,7 @@ export function validateEvidence(dir: string): ValidationResult {
         if (!token) continue
         const category = stringField(token, "category", "canaries.json.tokens[]")
         const text = stringField(token, "token", "canaries.json.tokens[]")
-        if (category !== null && !CANARY_CATEGORIES.has(category)) fail(`canaries.json has an unknown category ${category}`)
+        if (category !== null && !CANARY_CATEGORIES.has(category)) fail("canaries.json has an unknown category")
         if (category) categories.add(category)
         if (text) canaryTokens.push(text)
       }
@@ -415,10 +427,10 @@ export function validateEvidence(dir: string): ValidationResult {
     const content = readFileSync(file(name), "utf8")
     for (const token of canaryTokens) if (content.includes(token)) leaked.push(`${token} in ${name}`)
   }
-  if (leaked.length > 0) fail(`privacy canary leaked: ${leaked.join(", ")}`)
+  if (leaked.length > 0) fail("privacy canary leaked")
 
   // ---------------------------------------------------------------- snapshots
-  const snapshotFiles = existsSync(dir) ? readdirSync(dir).filter((name) => /^snapshot-[a-zA-Z0-9-]+\.json$/.test(name)) : []
+  const snapshotFiles = existsSync(dir) ? readdirSync(dir).filter((name) => /^snapshot-[0-9a-f-]{36}\.json$/i.test(name)) : []
   const snapshots: Json[] = []
   for (const name of snapshotFiles) {
     const value = readJson(name)
@@ -500,10 +512,17 @@ export function validateEvidence(dir: string): ValidationResult {
     capture.push(record)
   }
   const isEventRecord = (record: CaptureRecord): record is CapturedEvent => "eventIDHash" in record
-  const reference = readJsonl("reference.jsonl")
+  const referenceRaw = readJsonl("reference.jsonl")
+  const reference: Json[] = []
   const REFERENCE_KEYS = new Set(["v", "seq", "atMs", "source", "type", "eventIDHash", "sessionHash", "locationHash", "instanceId", "eventCreatedMs", "code"])
-  for (const record of reference) {
-    for (const key of Object.keys(record)) if (!REFERENCE_KEYS.has(key)) fail(`reference.jsonl has an unexpected key ${key}`)
+  for (const record of referenceRaw) {
+    const permittedKeys = Object.keys(record).every((key) => REFERENCE_KEYS.has(key))
+    const full = "code" in record ? record : { ...record, fields: [], values: {} }
+    if (!permittedKeys || !validateCaptureRecord(full) || record.source !== "subscribe") {
+      fail("reference.jsonl is outside the safe runtime schema")
+      continue
+    }
+    reference.push(record)
     if (record.v !== 1 || record.source !== "subscribe" || typeof record.type !== "string" || typeof record.instanceId !== "string") {
       fail("reference.jsonl contains an invalid record")
     }
@@ -582,13 +601,18 @@ export function validateEvidence(dir: string): ValidationResult {
   ]
 
   // ------------------------------------------------------------- publications
-  const publication = readJsonl("publication.jsonl")
+  const publication = readJsonl("publication.jsonl").filter((record) => {
+    const valid = isDeepStrictEqual(sanitizePublication(record), record)
+    if (!valid) fail("publication is outside the safe runtime schema")
+    return valid
+  })
   const PUBLICATION_KEYS = new Set([
     "v",
     "at",
     "instanceId",
     "pid",
     "attempt",
+    "phase",
     "live",
     "sessionHash",
     "selector",
@@ -605,12 +629,13 @@ export function validateEvidence(dir: string): ValidationResult {
     "modelProvenance",
   ])
   for (const record of publication) {
-    for (const key of Object.keys(record)) if (!PUBLICATION_KEYS.has(key)) fail(`publication.jsonl has an unexpected key ${key}`)
+    for (const key of Object.keys(record)) if (!PUBLICATION_KEYS.has(key)) fail("publication.jsonl has an unexpected key")
     if (record.v !== 1) fail("publication record v must be 1")
     stringField(record, "at", "publication", ISO)
     stringField(record, "instanceId", "publication", UUID)
     numberField(record, "pid", "publication", true)
     if (!ATTEMPTS.has(String(record.attempt))) fail(`publication attempt has an invalid enum: ${String(record.attempt)}`)
+    if (!PHASES.has(String(record.phase))) fail(`publication phase has an invalid enum: ${String(record.phase)}`)
     booleanField(record, "live", "publication")
     if (record.sessionHash !== undefined && (typeof record.sessionHash !== "string" || !HASH.test(record.sessionHash))) fail("publication.sessionHash must be a hash")
     if (record.selector !== undefined && !["route", "event"].includes(String(record.selector))) fail("publication.selector has an invalid enum")
@@ -657,11 +682,15 @@ export function validateEvidence(dir: string): ValidationResult {
   }
 
   // -------------------------------------------------------- publisher timeline
-  const publisherFiles = existsSync(dir) ? readdirSync(dir).filter((name) => /^publisher-[a-zA-Z0-9-]+\.jsonl$/.test(name)) : []
+  const publisherFiles = existsSync(dir) ? readdirSync(dir).filter((name) => /^publisher-[0-9a-f-]{36}\.jsonl$/i.test(name)) : []
   if (publisherFiles.length < 2) fail(`expected publisher logs from two instances, found ${publisherFiles.length}`)
   const publisherEvents: Json[] = []
   for (const name of publisherFiles) {
     for (const record of readJsonl(name)) {
+      if (!isDeepStrictEqual(sanitizePublisherEvent(record), record)) {
+        fail(`${name} is outside the safe runtime schema`)
+        continue
+      }
       const event = shape(record, name, ["v", "kind", "atMs", "instanceId", "pid", "generation"], ["fence", "previousFence", "reason", "code", "snapshotKind"])
       if (!event) continue
       if (event.v !== 1) fail(`${name}.v must be 1`)
@@ -725,7 +754,7 @@ export function validateEvidence(dir: string): ValidationResult {
         intervals.push({ instanceId, fence: current.fence, start: current.start, end: at })
         current = null
       }
-    } else if (kind === "renew" || kind === "critical") {
+    } else if (kind === "renew" || (kind === "critical" && event.reason === undefined)) {
       if (!current || current.instanceId !== instanceId || (fence !== undefined && current.fence !== fence)) fail(`${kind} by a non-owner or stale fence`)
     } else if (kind === "revoke") {
       const interval = intervals.find((entry) => entry.instanceId === instanceId && entry.fence === fence)
@@ -743,57 +772,136 @@ export function validateEvidence(dir: string): ValidationResult {
   const ownerAt = (at: number): Interval | null => intervals.find((interval) => interval.start <= at && at < interval.end) ?? null
 
   // ---------------------------------------------------------- write ownership
+  interface Operation {
+    enqueue?: Json
+    terminals: Json[]
+    key: string
+  }
+  const operations = new Map<string, Operation>()
+  const preEnqueueRefusals: Json[] = []
   const successes: Json[] = []
+  const uniqueSuccess = new Set<string>()
   for (const record of publication) {
     const attempt = String(record.attempt)
+    const phase = String(record.phase)
     const at = Date.parse(String(record.at))
     const nonce = typeof record.nonce === "string" ? record.nonce : undefined
-    const isWrite = attempt === "command-publish" || attempt === "disconnect-command" || attempt === "disconnect"
-    const refused = typeof record.code === "string"
-    if (record.attempt === "cleanup") scenarios[10]!.ok = true
+    const isWrite = attempt === "command-publish" || attempt === "disconnect-command"
+    if (attempt === "cleanup") scenarios[10]!.ok = true
     if (attempt === "disconnect-command") scenarios[11]!.ok = true
     if (attempt === "ready") {
       if (record.ready !== true) fail("ready record does not assert readiness")
       continue
     }
-    if (attempt === "cleanup" || attempt === "cleanup-close" || attempt === "socket-close" || attempt === "socket-error" || attempt === "revoked" || attempt === "coordination-start") continue
+    if (attempt === "cleanup" || attempt === "cleanup-close" || attempt === "socket-close" || attempt === "socket-error" || attempt === "revoked" || attempt === "coordination-start" || attempt === "disconnect") continue
     if (!Number.isFinite(at)) {
       fail("publication record has an unparseable at")
       continue
     }
-    if (refused && nonce) fail("a refused operation nevertheless enqueued a nonce")
-    if (nonce) {
-      const owner = ownerAt(at)
-      if (!owner) fail(`SET_ACTIVITY at ${String(record.at)} was not inside an ownership interval`)
-      else {
-        if (owner.instanceId !== record.instanceId) fail("SET_ACTIVITY was enqueued by an instance that did not own the lease")
-        if (owner.revokedAt !== undefined && at >= owner.revokedAt) fail("SET_ACTIVITY was enqueued by a revoked owner")
-        if (typeof record.fence !== "number" || owner.fence !== record.fence) fail("SET_ACTIVITY fence does not match the owner's fence")
-      }
-      if (record.cmd !== "SET_ACTIVITY") fail("enqueued record is not SET_ACTIVITY")
+
+    if (phase === "pre-enqueue") {
+      if (nonce) fail("a pre-enqueue refusal nevertheless carried a nonce")
+      if (typeof record.code !== "string") fail("a pre-enqueue refusal has no code")
+      if (isWrite) preEnqueueRefusals.push(record)
+      continue
     }
-    if (record.rpcOk === true) {
-      if (!nonce) fail("acknowledged SET_ACTIVITY has no nonce")
-      if (record.evt !== null) fail("acknowledged SET_ACTIVITY did not have evt=null")
-      if (!nonce || !isWrite) fail("acknowledgment is not attached to a publish/clear attempt")
-      if (attempt === "command-publish") {
-        if (!isObject(record.timestampProvenance) || "refusal" in record.timestampProvenance) fail("acknowledged write has no timestamp provenance")
-        if (!isObject(record.modelProvenance)) fail("acknowledged write has no model provenance")
-        const activity = isObject(record.activity) ? record.activity : null
+    if (phase === "lifecycle") { fail("a write command cannot use the lifecycle phase"); continue }
+    if (!isWrite) {
+      fail("enqueued/acknowledged record is not a publish or clear operation")
+      continue
+    }
+    if (!nonce) {
+      fail(`${phase} record has no nonce`)
+      continue
+    }
+    const key = `${String(record.instanceId)}:${nonce}`
+    const operation = operations.get(key) ?? { key, terminals: [] }
+    operations.set(key, operation)
+
+    if (phase === "enqueued") {
+      if (operation.enqueue) fail("duplicate enqueue evidence for one operation identity")
+      else operation.enqueue = record
+    } else if (phase === "acknowledged" || phase === "post-enqueue") {
+      operation.terminals.push(record)
+    } else {
+      fail(`unexpected write phase ${phase}`)
+    }
+  }
+
+  for (const operation of operations.values()) {
+    const enqueue = operation.enqueue
+    if (!enqueue) {
+      if (operation.terminals.length > 0) fail("terminal ACK/rejection has no matching enqueue")
+      continue
+    }
+    const at = Date.parse(String(enqueue.at))
+    const owner = ownerAt(at)
+    if (!owner) fail(`SET_ACTIVITY at ${String(enqueue.at)} was not inside an ownership interval`)
+    else {
+      if (owner.instanceId !== enqueue.instanceId) fail("SET_ACTIVITY was enqueued by an instance that did not own the lease")
+      if (owner.revokedAt !== undefined && at >= owner.revokedAt) fail("SET_ACTIVITY was enqueued by a revoked owner")
+      if (typeof enqueue.fence !== "number" || owner.fence !== enqueue.fence) fail("SET_ACTIVITY fence does not match the owner's fence")
+    }
+    if (enqueue.cmd !== "SET_ACTIVITY") fail("enqueued record is not SET_ACTIVITY")
+
+    if (operation.terminals.length === 0) {
+      fail("enqueued operation has no terminal acknowledgment, rejection, timeout or closure evidence")
+      continue
+    }
+    if (operation.terminals.length > 1) {
+      const outcomes = new Set(operation.terminals.map((terminal) => String(terminal.rpcOk)))
+      fail(outcomes.size > 1 ? "contradictory terminal outcomes for one operation identity" : "duplicate terminal evidence for one operation identity")
+      continue
+    }
+    const terminal = operation.terminals[0]!
+    const beforeOperation = failures.length
+    if (enqueue.live !== true || terminal.live !== true) fail("a live write was recorded with live disabled")
+    if (enqueue.rpcOk !== undefined || enqueue.code !== undefined) fail("enqueue contains a terminal outcome")
+    if (terminal.attempt !== enqueue.attempt || terminal.pid !== enqueue.pid) fail("terminal operation does not match enqueue")
+    if (terminal.sessionHash !== enqueue.sessionHash) fail("terminal session does not match enqueue")
+    if (!isDeepStrictEqual(terminal.activity, enqueue.activity)) fail("terminal activity does not match enqueue")
+    if (Date.parse(String(terminal.at)) < at) fail("terminal predates enqueue")
+    if ((terminal.phase === "acknowledged") !== (terminal.rpcOk === true)) fail("terminal phase contradicts its outcome")
+    if (terminal.instanceId !== enqueue.instanceId) fail("acknowledgment instance does not match the enqueue instance")
+    if (typeof terminal.fence !== "number") fail("acknowledgment has no fence")
+    else if (terminal.fence !== enqueue.fence) fail("acknowledgment fence does not match the enqueue fence")
+    if (terminal.cmd !== "SET_ACTIVITY") fail("acknowledgment is not SET_ACTIVITY")
+
+    if (terminal.rpcOk === true) {
+      if (terminal.evt !== null) fail("acknowledged SET_ACTIVITY did not have evt=null")
+      if (String(enqueue.attempt) === "command-publish") {
+        if (!isObject(terminal.timestampProvenance) || "refusal" in terminal.timestampProvenance) fail("acknowledged write has no timestamp provenance")
+        if (!isObject(terminal.modelProvenance)) fail("acknowledged write has no model provenance")
+        const activity = isObject(terminal.activity) ? terminal.activity : null
         if (!activity) fail("acknowledged SET_ACTIVITY has no activity")
         else {
           const validation = validateActivity(activity)
           if (!validation.ok) fail(`published payload is not the fixed M0 payload: ${validation.problems.join("; ")}`)
         }
-        if (typeof record.sessionHash !== "string") fail("acknowledged SET_ACTIVITY has no session identity")
-        successes.push(record)
-      } else if (attempt === "disconnect-command" && record.activity !== undefined) {
+        if (typeof terminal.sessionHash !== "string") fail("acknowledged SET_ACTIVITY has no session identity")
+        if (failures.length === beforeOperation && !uniqueSuccess.has(operation.key)) {
+          uniqueSuccess.add(operation.key)
+          successes.push(terminal)
+        }
+      } else if (String(enqueue.attempt) === "disconnect-command" && terminal.activity !== undefined) {
         fail("clear acknowledgment must not carry an activity")
       }
+    } else if (terminal.rpcOk === false) {
+      if (terminal.evt === "ERROR" && terminal.code !== "rpc-rejected") {
+        fail("nonce-matched RPC rejection has no rejection code")
+      }
+      if (!["rpc-rejected", "rpc-timeout", "rpc-closed", "connect-failed"].includes(String(terminal.code))) fail("post-enqueue failure has no transport outcome")
+    } else {
+      fail("terminal record has no rpcOk outcome")
     }
   }
+
   if (!publication.some((record) => record.attempt === "ready" && record.ready === true)) fail("no READY handshake is recorded")
-  if (successes.length < 5) fail(`expected at least five acknowledged SET_ACTIVITY writes, found ${successes.length}`)
+  if (successes.length < 5) fail(`expected at least five unique acknowledged SET_ACTIVITY writes, found ${successes.length}`)
+  if (!preEnqueueRefusals.some((record) => record.code === "identity-unknown")) {
+    fail("no explicit unknown-identity publication refusal is recorded")
+  }
+  if (!preEnqueueRefusals.some((record) => record.code === "no-observed-session")) fail("no explicit unknown-session refusal is recorded")
 
   const bySession = new Map<string, Json[]>()
   for (const record of successes) {
@@ -804,20 +912,19 @@ export function validateEvidence(dir: string): ValidationResult {
     bySession.set(sessionHash, list)
     const activity = record.activity as Json
     const provenance = record.timestampProvenance
-    if (!isObject(provenance) || "refusal" in provenance) {
-      fail("acknowledged write has no timestamp provenance")
-      continue
-    }
     const start = isObject(activity.timestamps) ? activity.timestamps.start : undefined
     if (provenance.seconds !== start) fail("published timestamp does not match provenance")
     if (provenance.committed === true && provenance.anchorCommitted !== true) fail("a committed anchor was not marked committed on acknowledgment")
-    if (provenance.committed === false && provenance.anchorCommitted !== true) fail("first acknowledged write did not commit its anchor")
+    if (provenance.committed === false && provenance.anchorCommitted === false && record.code !== "anchor-persist-failed") {
+      fail("first acknowledged write neither committed nor recorded a persistence failure")
+    }
     const model = isObject(activity.assets) ? activity.assets : null
     const modelProvenance = isObject(record.modelProvenance) ? record.modelProvenance : null
     const executed = modelProvenance && isObject(modelProvenance.executed) ? modelProvenance.executed : null
     if (!executed || typeof executed.providerID !== "string" || typeof executed.id !== "string") fail("acknowledged write lacks executed-model provenance")
     else if (model?.small_text !== `Model: ${executed.providerID}/${executed.id}`) fail("small_text does not match the executed model")
   }
+  if (bySession.size < 2) fail("expected at least two distinct published sessions")
   let hasFrozenRepeat = false
   for (const [sessionHash, group] of bySession) {
     const starts = new Set(group.map((record) => (record.timestampProvenance as Json).seconds))
@@ -826,13 +933,13 @@ export function validateEvidence(dir: string): ValidationResult {
     for (let i = 1; i < times.length; i += 1) {
       if ((times[i] as number) - (times[i - 1] as number) >= 4000) hasFrozenRepeat = true
     }
-    const first = group.find((record) => (record.timestampProvenance as Json).committed === false)
-    if (!first) notice(`session ${sessionHash} started from a stored anchor rather than a first successful publication`)
+    const unpersisted = group.filter((record) => (record.timestampProvenance as Json).anchorCommitted === false)
+    if (unpersisted.length > 0) {
+      const persisted = group.some((record) => (record.timestampProvenance as Json).anchorCommitted === true)
+      if (!persisted) fail(`session ${sessionHash} has an acknowledged anchor that was never persisted`)
+    }
   }
   if (!hasFrozenRepeat) fail("no same-session repeat was at least 4 seconds apart")
-  for (const record of successes) {
-    if (record.attempt !== "disconnect-command" && record.activity === undefined) fail("successful publication has no activity")
-  }
 
   // --------------------------------------------------------------- reconnect
   const reconnect =
@@ -844,7 +951,7 @@ export function validateEvidence(dir: string): ValidationResult {
   report.scenarios = Object.fromEntries(scenarios.map((scenario) => [scenario.name, scenario.ok]))
 
   // ------------------------------------------------------------------ summary
-  report.host = run?.host
+  report.host = sanitizeRun(run)?.host ?? null
   report.locality = locality
   report.canaries = { tokens: canaryTokens.length, filesScanned: scanned.length, leaked: leaked.length }
   report.fences = { intervals: intervals.length, highest: highestFence, instances: ownerInstances.size }

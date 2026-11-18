@@ -89,11 +89,11 @@ if (diffCheck.code !== 0) throw new Error("git diff --check failed")
 // ------------------------------------------------------------------ commands
 const typecheck = record("typecheck", [bun, "run", "typecheck"])
 const tests = record("test", [bun, "test"])
-const testCounts = parseTests(tests.stdout, "bun test")
+const testCounts = parseTests(tests.stdout + tests.stderr, "bun test")
 if (testCounts.fail !== 0) throw new Error("bun test reported failures")
 
 const build = record("build", [bun, "run", "build"])
-const modules = Number(mustMatch(build.stdout, /Bundled (\d+) modules/, "build module count")[1])
+const modules = Number(mustMatch(build.stdout + build.stderr, /Bundled (\d+) modules/, "build module count")[1])
 const bundlePath = join(repo, "dist", "tui.js")
 const bundleBytes = statSync(bundlePath).size
 const bundleSha256 = sha256(bundlePath)
@@ -119,7 +119,7 @@ const extractedBundleSha256 = sha256(extractedBundle)
 const installedBundleMatchesTarball = installedBundleSha256 === extractedBundleSha256
 
 const validatorSuite = record("validator-suite", [bun, "test", "test/validator.test.ts"])
-const validatorCounts = parseTests(validatorSuite.stdout, "validator suite")
+const validatorCounts = parseTests(validatorSuite.stdout + validatorSuite.stderr, "validator suite")
 if (validatorCounts.fail !== 0) throw new Error("validator fixture suite reported failures")
 
 makeEvidenceFixture(fixtureDir)
@@ -135,12 +135,13 @@ const packedGroups = Object.keys(packedResults.results ?? {})
 if (packedGroups.length === 0 || packedGroups.some((name) => packedResults.results?.[name] !== "PASS")) {
   throw new Error("packed harness has a non-PASS scenario group")
 }
-const packedLine = mustMatch(packedRun.stdout, /Packed entrypoint: (\d+) scenarios PASS/, "packed scenario count")
+const packedLine = mustMatch(packedRun.stdout + packedRun.stderr, /Packed entrypoint: (\d+) scenarios PASS/, "packed scenario count")
 
 const audit = record("audit", [bun, "audit"], { allowFailure: true })
-const vulnerabilityMatch = mustMatch(audit.stdout, /(\d+) vulnerabilities \((\d+) (moderate|high|critical|low)\)/, "audit summary")
+const auditText = audit.stdout + audit.stderr
+const vulnerabilityMatch = mustMatch(auditText, /(\d+) vulnerabilities \((\d+) (moderate|high|critical|low)\)/, "audit summary")
 const auditAdvisories: Array<{ severity: string; package: string; id: string }> = []
-const auditLines = audit.stdout.split("\n")
+const auditLines = auditText.split("\n")
 let currentPackage = "unknown"
 for (const line of auditLines) {
   const header = /^([\w@/.-]+)@([\d.]+)(?:, .*)?$/.exec(line.trim())

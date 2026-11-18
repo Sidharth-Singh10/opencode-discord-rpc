@@ -944,7 +944,9 @@ export function validateEvidence(dir: string): ValidationResult {
   // --------------------------------------------------------------- reconnect
   const reconnect =
     Object.values(perInstance).some((entry) => (entry.reference["server.connected"] ?? 0) >= 2) ||
-    publication.some((record) => record.attempt === "socket-close") && publication.some((record) => record.attempt === "ready" && typeof record.instanceId === "string" && publication.some((close) => close.attempt === "socket-close" && close.instanceId === record.instanceId))
+    publication.some((ready) => ready.attempt === "ready" && ready.ready === true &&
+      publication.some((close) => close.attempt === "socket-close" && close.instanceId === ready.instanceId &&
+        Date.parse(String(close.at)) < Date.parse(String(ready.at))))
   if (!reconnect) fail("no reconnect evidence (same-instance server.connected twice or re-READY)")
   scenarios[13]!.ok = reconnect
   for (const scenario of scenarios) if (!scenario.ok) fail(`scenario not observed: ${scenario.name}`)

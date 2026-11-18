@@ -125,6 +125,16 @@ describe("M0 evidence validator", () => {
   })
 
   describe("scenario evidence", () => {
+    expectFail("a READY before socket close is not reconnect evidence", (dir) => {
+      editJsonl(dir, "reference.jsonl", (records) => {
+        const kept = records.filter((r) => r.type !== "server.connected")
+        records.splice(0, records.length, ...kept)
+      })
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const ready = records.find((r) => r.attempt === "ready" && r.instanceId === "22222222-2222-4222-8222-222222222222")
+        ready.at = new Date(1_750_000_000_000 + 16_000).toISOString()
+      })
+    })
     expectFail("missing failed-turn scenario", (dir) =>
       editJsonl(dir, "capture.jsonl", (records) => {
         const kept = records.filter((record) => record.type !== "session.execution.failed")

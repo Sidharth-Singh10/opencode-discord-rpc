@@ -1,0 +1,19 @@
+{
+  "name": "opencode-presence-discord",
+  "version": "0.0.1",
+  "description": "Discord Rich Presence for OpenCode V2 (TUI only)",
+  "license": "MIT",
+  "type": "module",
+  "exports": { "./tui": "./dist/tui.js" },
+  "files": ["dist", "assets"],
+  "scripts": {
+    "build": "bun build ./src/tui.tsx --outdir dist --target node --format esm --external @opencode/plugin --external @opencode/plugin/* --external @opencode/client --external @opencode/client/* --external bun:sqlite --external node:sqlite",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepack": "bun run build && bun run scripts/pack-guard.ts",
+    "verify:evidence": "bun run scripts/m0-evidence.ts"
+  },
+  "dependencies": { "@opencode/plugin": "2.3.0" },
+  "devDependencies": { "typescript": "^5.9.0", "@types/bun": "latest" },
+  "engines": { "node": ">=22.5.0" }
+}

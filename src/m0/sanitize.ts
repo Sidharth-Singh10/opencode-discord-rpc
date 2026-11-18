@@ -13,20 +13,49 @@ export const VERSION = /^[0-9]+(\.[0-9]+){0,3}$/
 
 // M0 is a transmission spike, not a general metadata exporter. A grammar
 // alone would accept an API key or private label shaped like an identifier.
-// Extend these reviewed vocabularies explicitly; never learn them from events.
-const METADATA = new Set([
-  "opencode", "opencode-go", "deepseek-v4.1-flash", "deepseek-v4.1-flash-free",
-  "build", "plan", "default", "high", "medium", "low",
-])
+// Model and provider identities therefore stay reviewed finite vocabularies;
+// extend them explicitly and never learn them from events.
+const MODEL_IDS = new Set(["deepseek-v4.1-flash", "deepseek-v4.1-flash-free"])
+const PROVIDER_IDS = new Set(["opencode", "opencode-go"])
+
+// The host's full ReasoningEfforts set, plus its serialized no-variant marker.
+// Anything outside this set is an identity we cannot name, so it refuses.
+const VARIANTS = new Set(["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"])
+
+// Agents are user-defined in OpenCode config, so a finite list cannot be the
+// rule. Built-in names are listed for clarity; a custom agent is admitted only
+// by this documented shape: one lowercase identifier segment, 1-64 characters
+// from [a-z0-9._-], starting with a letter. That is not free text: it excludes
+// "/", "=", whitespace, credential-shaped mixed case and separators that would
+// smuggle a path or query into provenance.
+const BUILTIN_AGENTS = new Set(["build", "plan", "general", "compaction", "explore"])
+const AGENT_ID = /^[a-z][a-z0-9._-]{0,63}$/
 
 export type Primitive = string | number | boolean
+
+export type ModelIdentityCode = "executed-model-unknown" | "executed-provider-unknown" | "executed-variant-unknown"
+export type AgentIdentityCode = "executed-agent-unknown"
 
 export function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
 }
 
-export function safeIdentifier(value: unknown): string | null {
-  return typeof value === "string" && METADATA.has(value) ? value : null
+export function safeModelID(value: unknown): string | null {
+  return typeof value === "string" && MODEL_IDS.has(value) ? value : null
+}
+
+export function safeProviderID(value: unknown): string | null {
+  return typeof value === "string" && PROVIDER_IDS.has(value) ? value : null
+}
+
+export function safeVariant(value: unknown): string | null {
+  return typeof value === "string" && VARIANTS.has(value) ? value : null
+}
+
+export function safeAgent(value: unknown): string | null {
+  if (typeof value !== "string") return null
+  if (BUILTIN_AGENTS.has(value)) return value
+  return AGENT_ID.test(value) ? value : null
 }
 
 export function safeVersion(value: unknown): string | null {
@@ -67,17 +96,31 @@ export interface SafeModel {
   variant?: string
 }
 
-export function sanitizeModel(value: unknown): SafeModel | null {
+/**
+ * Classified model identity. `sanitizeModel` keeps the projection contract;
+ * publication uses this result so a refusal names the field that failed instead
+ * of reporting every identity problem as `executed-model-unknown`.
+ */
+export function readModel(value: unknown): { ok: true; model: SafeModel } | { ok: false; code: ModelIdentityCode } {
   const model = asObject(value)
-  if (!model) return null
-  const id = safeIdentifier(model.id)
-  const providerID = safeIdentifier(model.providerID)
-  if (!id || !providerID) return null
+  if (!model) return { ok: false, code: "executed-model-unknown" }
+  const id = safeModelID(model.id)
+  if (!id) return { ok: false, code: "executed-model-unknown" }
+  const providerID = safeProviderID(model.providerID)
+  if (!providerID) return { ok: false, code: "executed-provider-unknown" }
+  // A null variant means "no variant". The host may serialize "default" for
+  // the same state, but null must not nullify an otherwise valid identity.
+  if (model.variant === undefined || model.variant === null) return { ok: true, model: { id, providerID } }
   // An identity that ran with an unreviewed variant is not the identity we can
   // name. Dropping the variant would silently publish a different identity.
-  const variant = model.variant === undefined ? undefined : safeIdentifier(model.variant)
-  if (!variant && model.variant !== undefined) return null
-  return { id, providerID, ...(variant ? { variant } : {}) }
+  const variant = safeVariant(model.variant)
+  if (!variant) return { ok: false, code: "executed-variant-unknown" }
+  return { ok: true, model: { id, providerID, variant } }
+}
+
+export function sanitizeModel(value: unknown): SafeModel | null {
+  const result = readModel(value)
+  return result.ok ? result.model : null
 }
 
 export interface SafeTokens {
@@ -122,7 +165,7 @@ export function sanitizeInspection(value: unknown): Record<string, unknown> | nu
   const tokens = inspection.tokens === null ? null : sanitizeTokens(inspection.tokens)
   const selectedModel = inspection.selectedModel === null ? null : sanitizeModel(inspection.selectedModel)
   const executedModel = inspection.executedModel === null ? null : sanitizeModel(inspection.executedModel)
-  const agent = inspection.agent === null ? null : safeIdentifier(inspection.agent)
+  const agent = inspection.agent === null ? null : safeAgent(inspection.agent)
   const messageCount = safeInt(inspection.messageCount, 0)
   const latestUserMessageAtMs = inspection.latestUserMessageAtMs === null ? null : safeInt(inspection.latestUserMessageAtMs, 1)
   const latestUserMessageSource =
@@ -409,6 +452,9 @@ const CODES = [
   "no-observed-session",
   "session-unreadable",
   "executed-model-unknown",
+  "executed-provider-unknown",
+  "executed-variant-unknown",
+  "executed-agent-unknown",
   "timestamp-unavailable",
   "payload-invalid",
   "anchor-conflict",
@@ -464,7 +510,7 @@ export function sanitizeModelProvenance(value: unknown): Record<string, unknown>
   return {
     selected: model.selected === null ? null : sanitizeModel(model.selected),
     executed: model.executed === null ? null : sanitizeModel(model.executed),
-    agent: model.agent === null ? null : safeIdentifier(model.agent),
+    agent: model.agent === null ? null : safeAgent(model.agent),
     sessionCost: model.sessionCost === null ? null : safeNumber(model.sessionCost),
     reportedCost: model.reportedCost === null ? null : safeNumber(model.reportedCost),
     tokens: model.tokens === null ? null : sanitizeTokens(model.tokens),

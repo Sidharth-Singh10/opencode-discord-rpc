@@ -12,7 +12,7 @@ import { arch, hostname, platform } from "node:os"
 
 import type { Context } from "@opencode/plugin/tui/plugin"
 
-import { safeEnum, safeIdentifier, safeInt, safeNumber, safeVersion, sanitizeModel, sanitizeTokens } from "./sanitize.js"
+import { readModel, safeAgent, safeEnum, safeInt, safeNumber, safeVersion, sanitizeModel, sanitizeTokens, type AgentIdentityCode, type ModelIdentityCode } from "./sanitize.js"
 
 export type SqliteKind = "bun:sqlite" | "node:sqlite"
 
@@ -349,7 +349,11 @@ export interface SessionInspection {
   tokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number } | null
   selectedModel: ModelRefLike | null
   executedModel: ModelRefLike | null
+  /** Why executedModel is null; runtime-only, not projected into evidence. */
+  executedModelCode: ModelIdentityCode | null
   agent: string | null
+  /** Set when the newest execution has no admissible agent. */
+  agentCode: AgentIdentityCode | null
   messageCount: number
   latestUserMessageAtMs: number | null
   latestUserMessageSource: string | null
@@ -386,7 +390,9 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     tokens: null,
     selectedModel: null,
     executedModel: null,
+    executedModelCode: null,
     agent: null,
+    agentCode: null,
     messageCount: 0,
     latestUserMessageAtMs: null,
     latestUserMessageSource: null,
@@ -459,8 +465,11 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     // Choose the newest execution first, even when its identity is unusable.
     // Neither older executions nor the session's current selection can stand
     // in for the model/provider/agent that actually ran.
-    inspection.executedModel = sanitizeModel(message.model)
-    inspection.agent = safeIdentifier(message.agent)
+    const executed = readModel(message.model)
+    inspection.executedModel = executed.ok ? executed.model : null
+    inspection.executedModelCode = executed.ok ? null : executed.code
+    inspection.agent = safeAgent(message.agent)
+    inspection.agentCode = inspection.agent === null ? "executed-agent-unknown" : null
     break
   }
 

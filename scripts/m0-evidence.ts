@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from "node:util"
 import { validateCaptureRecord, type CaptureRecord } from "../src/m0/capture.js"
 import type { CapturedEvent } from "../src/m0/capture.js"
 import { validateActivity } from "../src/discord/presence.js"
-import { sanitizePublication, sanitizePublisherEvent, sanitizeRun, safeIdentifier } from "../src/m0/sanitize.js"
+import { sanitizePublication, sanitizePublisherEvent, sanitizeRun, safeAgent, safeModelID, safeProviderID, safeVariant } from "../src/m0/sanitize.js"
 
 export interface ValidationResult {
   failures: string[]
@@ -40,6 +40,9 @@ const CODES = new Set([
   "no-observed-session",
   "session-unreadable",
   "executed-model-unknown",
+  "executed-provider-unknown",
+  "executed-variant-unknown",
+  "executed-agent-unknown",
   "timestamp-unavailable",
   "payload-invalid",
   "anchor-conflict",
@@ -171,9 +174,14 @@ export function validateEvidence(dir: string): ValidationResult {
     stringField(model, "id", name)
     stringField(model, "providerID", name)
     if ("variant" in model) stringField(model, "variant", name)
-    for (const key of ["id", "providerID", "variant"]) {
-      if (key in model && !safeIdentifier(model[key])) fail(`${name}.${key} is outside the M0 metadata vocabulary`)
-    }
+    if ("id" in model && !safeModelID(model.id)) fail(`${name}.id is outside the reviewed model vocabulary`)
+    if ("providerID" in model && !safeProviderID(model.providerID)) fail(`${name}.providerID is outside the reviewed provider vocabulary`)
+    if ("variant" in model && !safeVariant(model.variant)) fail(`${name}.variant is outside the host variant vocabulary`)
+  }
+
+  function validateAgent(container: Json, key: string, name: string): void {
+    const value = container[key]
+    if (typeof value !== "string" || !safeAgent(value)) fail(`${name}.${key} is not a built-in or documented custom agent identifier`)
   }
 
   function validateTokens(value: unknown, name: string): void {
@@ -303,7 +311,7 @@ export function validateEvidence(dir: string): ValidationResult {
     validateTokens(inspection.tokens, `${name}.tokens`)
     validateModel(inspection.selectedModel, `${name}.selectedModel`)
     validateModel(inspection.executedModel, `${name}.executedModel`)
-    if (inspection.agent !== null) stringField(inspection, "agent", name)
+    if (inspection.agent !== null) validateAgent(inspection, "agent", name)
     numberField(inspection, "messageCount", name, true)
     if (inspection.latestUserMessageAtMs !== null) numberField(inspection, "latestUserMessageAtMs", name, true)
     if (inspection.latestUserMessageSource !== null) {
@@ -672,7 +680,7 @@ export function validateEvidence(dir: string): ValidationResult {
       if (model) {
         validateModel(model.selected, "modelProvenance.selected")
         validateModel(model.executed, "modelProvenance.executed")
-        if (model.agent !== null) stringField(model, "agent", "modelProvenance")
+        if (model.agent !== null) validateAgent(model, "agent", "modelProvenance")
         for (const key of ["sessionCost", "reportedCost"]) {
           if (model[key] !== null && (typeof model[key] !== "number" || !Number.isFinite(model[key]))) fail(`modelProvenance.${key} must be a number or null`)
         }

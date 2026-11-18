@@ -87,6 +87,9 @@ export type PublicationCode =
   | "no-observed-session"
   | "session-unreadable"
   | "executed-model-unknown"
+  | "executed-provider-unknown"
+  | "executed-variant-unknown"
+  | "executed-agent-unknown"
   | "timestamp-unavailable"
   | "payload-invalid"
   | "anchor-conflict"
@@ -371,7 +374,7 @@ export default Plugin.define({
       const base: PublicationRecord = { v: 1, at: timestamp(), instanceId, pid: process.pid, attempt, phase: "pre-enqueue", live: options.live }
       const refuse = (code: PublicationCode, extra: Partial<PublicationRecord> = {}): void => {
         publishRecord({ ...base, ...extra, code })
-        if (!disposed && !disposing) toast("Presence update refused")
+        if (!disposed && !disposing) toast(`Presence update refused: ${code}`)
       }
       if (!options.live) return refuse("live-disabled")
       if (!publisher) return refuse("no-coordinator")
@@ -389,18 +392,13 @@ export default Plugin.define({
       try {
         for (let attemptIndex = 0; attemptIndex < 3; attemptIndex += 1) {
           if (disposed || disposing) return
-          if (!connection) {
-            try {
-              connection = await connectIpc()
-            } catch {
-              return refuse("connect-failed")
-            }
-          }
-          if (!connection || disposed || disposing) return
+          // Availability is decided before any socket exists. A refused
+          // identity must not open a Discord connection or log READY.
           const inspection = await inspectSession(context, observed.sessionID, salt)
           if (disposed || disposing) return
           if (!inspection.found) return refuse("session-unreadable")
-          if (!inspection.executedModel || !inspection.agent) return refuse("executed-model-unknown")
+          if (!inspection.executedModel) return refuse(inspection.executedModelCode ?? "executed-model-unknown")
+          if (!inspection.agent) return refuse("executed-agent-unknown")
 
           const state = publisher.readAnchorState(sessionKey)
           const reserved = state.acknowledgedUnpersisted ?? state.committed ?? state.pending
@@ -445,6 +443,26 @@ export default Plugin.define({
           }
           if (!publisher.isOwner) return refuse("not-owner", baseWithSession)
           if (disposed || disposing) return
+
+          // A durable committed/pending disagreement is a conflict we can
+          // already prove without a socket. Refuse it here rather than letting
+          // the transactional recheck discover it after connecting.
+          const conflicting =
+            (state.committed !== null && (state.committed.seconds !== selected.seconds || state.committed.sourceCreatedMs !== selected.sourceCreatedMs)) ||
+            (state.pending !== null && (state.pending.seconds !== selected.seconds || state.pending.sourceCreatedMs !== selected.sourceCreatedMs))
+          if (conflicting) return refuse("anchor-conflict", baseWithSession)
+
+          // Everything that can refuse on identity, timestamps, payload or
+          // ownership has passed. Only now is the publication attempted, so
+          // the socket is opened here rather than before validation.
+          if (!connection) {
+            try {
+              connection = await connectIpc()
+            } catch {
+              return refuse("connect-failed", baseWithSession)
+            }
+          }
+          if (!connection || disposed || disposing) return
 
           // Durable intent precedes the synchronous owner/fence + socket
           // enqueue transaction, which rechecks authoritative anchor state.

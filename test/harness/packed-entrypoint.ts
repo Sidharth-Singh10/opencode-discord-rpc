@@ -102,19 +102,20 @@ try {
     const older = { type: "assistant", model: { id: "deepseek-v4.1-flash-free", providerID: "opencode" }, agent: "build" }
     const credential = { credentials: { token: "NEWEST_CREDENTIAL_CONTAINER", path: "/home/NEWEST_PRIVATE/file" } }
     const cases = [
-      { name: "container-model", model: { ...older.model, id: credential }, agent: "plan" },
-      { name: "unsupported-model", model: { ...older.model, id: "unsupported-newest-model" }, agent: "plan" },
-      { name: "container-provider", model: { ...older.model, providerID: credential }, agent: "plan" },
-      { name: "unsupported-provider", model: { ...older.model, providerID: "unsupported-newest-provider" }, agent: "plan" },
-      { name: "container-variant", model: { ...older.model, variant: credential }, agent: "plan" },
-      { name: "unsupported-variant", model: { ...older.model, variant: "unsupported-newest-variant" }, agent: "plan" },
-      { name: "container-agent", model: older.model, agent: credential },
-      { name: "unsupported-agent", model: older.model, agent: "unsupported-newest-agent" },
+      { name: "container-model", model: { ...older.model, id: credential }, agent: "plan", code: "executed-model-unknown" },
+      { name: "unsupported-model", model: { ...older.model, id: "unsupported-newest-model" }, agent: "plan", code: "executed-model-unknown" },
+      { name: "container-provider", model: { ...older.model, providerID: credential }, agent: "plan", code: "executed-provider-unknown" },
+      { name: "unsupported-provider", model: { ...older.model, providerID: "unsupported-newest-provider" }, agent: "plan", code: "executed-provider-unknown" },
+      { name: "container-variant", model: { ...older.model, variant: credential }, agent: "plan", code: "executed-variant-unknown" },
+      { name: "unsupported-variant", model: { ...older.model, variant: "unsupported-newest-variant" }, agent: "plan", code: "executed-variant-unknown" },
+      { name: "container-agent", model: older.model, agent: credential, code: "executed-agent-unknown" },
+      { name: "agent-path", model: older.model, agent: "unsupported/newest-agent", code: "executed-agent-unknown" },
+      { name: "agent-query", model: older.model, agent: "unsupported/newest-agent=value", code: "executed-agent-unknown" },
     ]
     const assertPrivate = (h: Host): void => {
       for (const file of evidenceFiles(h.evidence)) {
         const content = readFileSync(file, "utf8")
-        for (const token of ["NEWEST_CREDENTIAL_CONTAINER", "/home/NEWEST_PRIVATE/file", "unsupported-newest-"]) {
+        for (const token of ["NEWEST_CREDENTIAL_CONTAINER", "/home/NEWEST_PRIVATE/file", "unsupported-newest-", "unsupported/newest-agent"]) {
           assert(!content.includes(token), `newest-assistant identity leaked in ${file}`)
         }
       }
@@ -132,15 +133,17 @@ try {
           { type: "user", time: { created: 1_750_000_010_123 } },
         ], agent: "build" })
       await h.call("snapshot")
+      const connectionsBefore = fake.connections
       const framesBefore = fake.activityFrames().length
       assert.equal((await h.call("publish")).ok, true)
-      await until(() => records(h.evidence).some((r) => r.code === "executed-model-unknown"))
+      await until(() => records(h.evidence).some((r) => r.code === identity.code))
       const publication = records(h.evidence).filter((r) => r.attempt === "command-publish").at(-1)
-      assert.equal(publication.code, "executed-model-unknown")
+      assert.equal(publication.code, identity.code)
       assert.equal(publication.phase, "pre-enqueue")
       assert.equal(publication.nonce, undefined)
       assert.equal(acks(h).length, anchored ? 1 : 0)
       assert.equal(fake.activityFrames().length, framesBefore, "unsupported newest identity must not enqueue")
+      assert.equal(fake.connections, connectionsBefore, "refused identity must not open a connection")
       const snapshot = JSON.parse(readFileSync(join(h.evidence, "snapshot.json"), "utf8"))
       assert.equal(snapshot.inspection.agent, ["plan"].includes(identity.agent as string) ? "plan" : null)
       if (identity.name.includes("model") || identity.name.includes("provider") || identity.name.includes("variant")) assert.equal(snapshot.inspection.executedModel, null)
@@ -178,6 +181,63 @@ try {
     await h.call("disconnect")
     await h.stop()
     assertPrivate(h)
+  })
+  await test("host-reasoning-variants-and-agent-vocabularies", async () => {
+    const fake = await endpoint("vocabulary")
+    const base = { id: "deepseek-v4.1-flash", providerID: "opencode-go" }
+    const messages = (model: unknown, agent: string) => ({ state: { messages: [
+      { type: "user", time: { created: 1_750_000_000_123 } },
+      { type: "assistant", model, agent },
+    ] } })
+
+    for (const variant of ["max", "xhigh", "none", "minimal"]) {
+      const h = await host(`variant-${variant}`, fake, "local", messages({ ...base, variant }, "build"))
+      await h.call("publish")
+      await until(() => acks(h).length === 1)
+      assert.equal(acks(h)[0].phase, "acknowledged")
+      assert.equal(acks(h)[0].modelProvenance.executed.variant, variant, `variant ${variant} must survive provenance`)
+      await h.call("disconnect")
+      await h.stop()
+    }
+
+    const nullVariant = await host("variant-null", fake, "local", messages({ ...base, variant: null }, "build"))
+    await nullVariant.call("publish")
+    await until(() => acks(nullVariant).length === 1)
+    assert.deepEqual(acks(nullVariant)[0].modelProvenance.executed, base, "a null variant publishes as no variant")
+    assert.equal("variant" in acks(nullVariant)[0].modelProvenance.executed, false)
+    await nullVariant.call("disconnect")
+    await nullVariant.stop()
+
+    for (const agent of ["general", "compaction", "my-reviewer"]) {
+      const h = await host(`agent-${agent}`, fake, "local", messages(base, agent))
+      await h.call("publish")
+      await until(() => acks(h).length === 1)
+      assert.equal(acks(h)[0].modelProvenance.agent, agent, `agent ${agent} must survive provenance`)
+      await h.call("disconnect")
+      await h.stop()
+    }
+
+    // Availability refusals use a dedicated endpoint so zero connections means
+    // zero, not merely "no new connection after an earlier success".
+    const refused = await endpoint("vocabulary-refusal")
+    const refusal = async (name: string, metadata: unknown, code: string): Promise<void> => {
+      const h = await host(name, refused, "local", metadata)
+      const frames = refused.activityFrames().length
+      assert.equal((await h.call("publish")).ok, true)
+      await until(() => records(h.evidence).some((r) => r.code === code))
+      const publication = records(h.evidence).filter((r) => r.attempt === "command-publish").at(-1)
+      assert.equal(publication.phase, "pre-enqueue")
+      assert.equal(publication.nonce, undefined)
+      assert.equal(refused.activityFrames().length, frames, `${code} must not enqueue`)
+      assert.equal(refused.connections, 0, `${code} must not open a connection`)
+      assert.equal(acks(h).length, 0)
+      await h.stop()
+    }
+    for (const agent of ["bad/agent", "bad=agent"]) await refusal(`refuse-agent-${agent.includes("/") ? "path" : "query"}`, messages(base, agent), "executed-agent-unknown")
+    await refusal("refuse-variant", messages({ ...base, variant: "ultra" }, "build"), "executed-variant-unknown")
+    await refusal("refuse-model", messages({ ...base, id: "unsupported-vocabulary-model" }, "build"), "executed-model-unknown")
+    await refusal("refuse-provider", messages({ ...base, providerID: "unsupported-vocabulary-provider" }, "build"), "executed-provider-unknown")
+    await refusal("refuse-no-session", { state: { home: true } }, "no-observed-session")
   })
   await test("authorized-rejection-closure-and-reconnect", async () => {
     const fake = await endpoint("rejection", { rejectOnce: true })
@@ -271,13 +331,18 @@ try {
     db.query("INSERT INTO anchor VALUES (?, ?, ?, ?)").run(pending.session_key, 1_750_000_010, 1_750_000_010_123, Date.now())
     await first
     await h.call("set", { created: 1_750_000_010_123 })
+    const connectionsBefore = fake.connections
     await h.call("publish")
     assert.equal(starts(fake).length, 1)
     await until(() => records(h.evidence).some((r) => r.code === "anchor-conflict"))
+    assert.equal(fake.connections, connectionsBefore, "a proven anchor conflict must not open a connection")
     await h.stop()
     const reload = await host("conflict", fake)
+    const reloadConnections = fake.connections
     await reload.call("publish")
     assert.equal(starts(fake).length, 1)
+    await until(() => records(reload.evidence).some((r) => r.code === "anchor-conflict"))
+    assert.equal(fake.connections, reloadConnections, "a reloaded anchor conflict must not open a connection")
     db.close()
     await reload.call("disconnect")
     await reload.stop()
@@ -355,6 +420,7 @@ try {
     }
     await h.stop()
     assert.equal(fake.activityFrames().length, 0)
+    assert.equal(fake.connections, 0, "refused privacy publications must not connect")
     for (const file of evidenceFiles(h.evidence)) {
       const content = readFileSync(file, "utf8")
       for (const secret of ["CRITIC", "CREDENTIAL", "user:password", "/private/file"]) assert(!content.includes(secret), `privacy leak in ${file}`)

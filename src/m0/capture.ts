@@ -12,7 +12,7 @@ import { join } from "node:path"
 import type { Context } from "@opencode/plugin/tui/plugin"
 
 import { pseudonym } from "./probe.js"
-import { safeIdentifier, safeUuid, sanitizeLocality, sanitizeProbe, sanitizePublication, sanitizePublisherEvent, sanitizeRun, sanitizeSnapshot } from "./sanitize.js"
+import { safeAgent, safeModelID, safeProviderID, safeUuid, sanitizeLocality, sanitizeProbe, sanitizePublication, sanitizePublisherEvent, sanitizeRun, sanitizeSnapshot } from "./sanitize.js"
 
 export interface EvidenceOptions {
   dir: string
@@ -305,13 +305,13 @@ function allowedValues(type: string, data: Record<string, unknown>): Record<stri
     values.reply = String(reply?.type)
   }
   if (type === "session.model.selected") {
-    const providerID = safeIdentifier(model?.providerID)
-    const modelID = safeIdentifier(model?.id)
+    const providerID = safeProviderID(model?.providerID)
+    const modelID = safeModelID(model?.id)
     if (providerID) values.providerID = providerID
     if (modelID) values.modelID = modelID
   }
   if (type === "session.agent.selected") {
-    const agentID = safeIdentifier(data.agentID)
+    const agentID = safeAgent(data.agentID)
     if (agentID) values.agentID = agentID
   }
   if ((type === "session.tool.called" || type === "session.tool.success" || type === "session.tool.failed") && typeof data.executed === "boolean") {
@@ -371,7 +371,9 @@ export function validateCaptureRecord(value: unknown): value is CaptureRecord {
     if (!allowedValueKeys.has(key)) return false
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return false
     if (typeof value === "number" && !Number.isFinite(value)) return false
-    if (typeof value === "string" && ["providerID", "modelID", "agentID"].includes(key) && !safeIdentifier(value)) return false
+    if (typeof value === "string" && key === "providerID" && !safeProviderID(value)) return false
+    if (typeof value === "string" && key === "modelID" && !safeModelID(value)) return false
+    if (typeof value === "string" && key === "agentID" && !safeAgent(value)) return false
     if (typeof value === "string" && key === "reason" && !["user", "shutdown", "superseded", "inactivity", "auto", "manual"].includes(value)) return false
     if (typeof value === "string" && key === "status" && !["idle", "retry"].includes(value)) return false
     if (typeof value === "string" && key === "reply" && !["once", "always", "reject"].includes(value)) return false

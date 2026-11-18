@@ -74,7 +74,7 @@ function parseTests(stdout: string, label: string): { pass: number; fail: number
     pass: Number(mustMatch(stdout, /(\d+) pass/, `${label} pass count`)[1]),
     fail: Number(mustMatch(stdout, /(\d+) fail/, `${label} fail count`)[1]),
     assertions: Number(mustMatch(stdout, /(\d+) expect\(\) calls/, `${label} assertion count`)[1]),
-    files: Number(mustMatch(stdout, /Ran \d+ tests across (\d+) files/, `${label} file count`)[1]),
+    files: Number(mustMatch(stdout, /Ran \d+ tests across (\d+) files?/, `${label} file count`)[1]),
   }
 }
 

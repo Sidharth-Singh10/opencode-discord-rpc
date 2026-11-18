@@ -12,6 +12,8 @@ import { arch, hostname, platform } from "node:os"
 
 import type { Context } from "@opencode/plugin/tui/plugin"
 
+import { safeEnum, safeIdentifier, safeInt, safeNumber, safeVersion, sanitizeModel, sanitizeTokens } from "./sanitize.js"
+
 export type SqliteKind = "bun:sqlite" | "node:sqlite"
 
 export interface SqliteHandle {
@@ -136,8 +138,8 @@ export async function probeRuntime(context: Context): Promise<{ report: RuntimeP
   const report: RuntimeProbe = {
     observedAt: new Date().toISOString(),
     host: {
-      version: context.app?.version ?? "unknown",
-      channel: context.app?.channel ?? "unknown",
+      version: safeVersion(context.app?.version) ?? "0.0.0",
+      channel: safeEnum(context.app?.channel, ["latest", "dev", "canary", "test"] as const) ?? "unknown",
       kind,
       ...(versions.bun ? { bun: versions.bun } : {}),
       ...(versions.node ? { node: versions.node } : {}),
@@ -210,6 +212,11 @@ export function loadPseudonymSalt(runtimeDir: string): string {
   }
 }
 
+export function sessionAnchorKey(classification: { class: string; serverFingerprint: string | null }, sessionID: string): string | null {
+  if (classification.class !== "local" || typeof classification.serverFingerprint !== "string" || !/^[0-9a-f]{16}$/.test(classification.serverFingerprint)) return null
+  return createHash("sha256").update("local").update("\u0000").update(classification.serverFingerprint).update("\u0000").update(sessionID).digest("hex")
+}
+
 export function pseudonym(salt: string, value: string): string {
   return createHash("sha256").update(salt).update("\u0000").update(value).digest("hex").slice(0, 16)
 }
@@ -241,9 +248,12 @@ export interface LocalityClassification {
   observedAt: string
 }
 
+function normalizeHostname(value: string): string {
+  return value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value
+}
+
 function isLoopbackHost(value: string): boolean {
-  const host = value.replace(/^\[/, "").replace(/\]$/, "").split(":")[0]
-  if (!host) return false
+  const host = normalizeHostname(value).toLowerCase()
   return host === "localhost" || host === "127.0.0.1" || host === "::1"
 }
 
@@ -253,12 +263,14 @@ function fingerprintIdentity(serverHostname: string, urls: string[]): string {
 
 /**
  * Fail closed: only a complete identity that names this host and advertises
- * exclusively loopback URLs is `local`. Missing, empty or malformed identity is
- * `unknown`; a differing host or non-loopback URL is `remote`. Both refuse
- * local-DB enrichment. Raw hostnames, URLs and exception text are never kept.
+ * exclusively loopback URLs is `local`. The advertised array is validated as a
+ * whole; malformed/null/empty entries are never filtered away. Missing, empty
+ * or malformed identity is `unknown`; a differing host or non-loopback URL is
+ * `remote`. Both refuse local-DB enrichment. Raw hostnames, URLs and exception
+ * text are never kept.
  */
 export async function classifyLocality(context: Context): Promise<LocalityClassification> {
-  const local = localHostname()
+  const local = normalizeHostname(localHostname())
   const observedAt = new Date().toISOString()
   const unknown = (reason: LocalityReason, hostnamePresent: boolean, hostnameMatches: boolean | null, urlCount: number, allUrlsLoopback: boolean | null): LocalityClassification => ({
     class: "unknown",
@@ -276,30 +288,38 @@ export async function classifyLocality(context: Context): Promise<LocalityClassi
     return unknown("server-info-unavailable", false, null, 0, null)
   }
 
-  const hostname = typeof info?.hostname === "string" && info.hostname.trim().length > 0 ? info.hostname : null
-  const urls = Array.isArray(info?.urls) ? info.urls.filter((url): url is string => typeof url === "string" && url.length > 0) : []
+  const hostname = typeof info?.hostname === "string" && info.hostname.length > 0 && info.hostname === info.hostname.trim() ? info.hostname : null
+  const rawURLs = info?.urls
   const hostnamePresent = hostname !== null
-  const hostnameMatches = hostname === null ? null : hostname === local || hostname === "localhost"
-  const parsed = urls.map((url) => {
-    try {
-      return new URL(url)
-    } catch {
-      return null
-    }
-  })
-  const validURLs = parsed.every((url) => url !== null)
-  const allUrlsLoopback = urls.length > 0 && validURLs ? parsed.every((url) => url !== null && isLoopbackHost(url.hostname)) : null
+  const hostnameMatches = hostname === null ? null : normalizeHostname(hostname).toLowerCase() === local.toLowerCase()
+  const urlCount = Array.isArray(rawURLs) ? rawURLs.length : 0
+  const completeArray = Array.isArray(rawURLs) && rawURLs.length > 0
+  const entriesValid =
+    completeArray &&
+    Array.from(rawURLs).every((entry) => typeof entry === "string" && entry.length > 0 && entry === entry.trim())
+  const parsed = entriesValid
+    ? (rawURLs as string[]).map((entry) => {
+        try {
+          const url = new URL(entry)
+          return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url : null
+        } catch {
+          return null
+        }
+      })
+    : []
+  const allParsed = entriesValid && parsed.every((url) => url !== null)
+  const allUrlsLoopback = allParsed ? parsed.every((url) => url !== null && isLoopbackHost(url.hostname)) : completeArray ? false : null
 
-  if (!hostnamePresent || urls.length === 0 || !validURLs) {
-    return unknown("identity-incomplete", hostnamePresent, hostnameMatches, urls.length, allUrlsLoopback)
+  if (!hostnamePresent || !completeArray || !entriesValid || !allParsed) {
+    return unknown("identity-incomplete", hostnamePresent, hostnameMatches, urlCount, allUrlsLoopback)
   }
   if (hostnameMatches !== true || allUrlsLoopback !== true) {
     return {
       class: "remote",
       enrichment: "refused",
       reason: hostnameMatches !== true ? "host-mismatch" : "url-not-loopback",
-      serverFingerprint: fingerprintIdentity(hostname, urls),
-      evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount: urls.length, allUrlsLoopback },
+      serverFingerprint: fingerprintIdentity(hostname, rawURLs as string[]),
+      evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount, allUrlsLoopback },
       observedAt,
     }
   }
@@ -307,8 +327,8 @@ export async function classifyLocality(context: Context): Promise<LocalityClassi
     class: "local",
     enrichment: "allowed",
     reason: "host-and-urls-match",
-    serverFingerprint: fingerprintIdentity(hostname, urls),
-    evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount: urls.length, allUrlsLoopback },
+    serverFingerprint: fingerprintIdentity(hostname, rawURLs as string[]),
+    evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount, allUrlsLoopback },
     observedAt,
   }
 }
@@ -412,31 +432,31 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     errors.push("session-status-failed")
   }
   try {
-    inspection.sessionCost = context.data.session.cost(sessionID)
+    inspection.sessionCost = safeNumber(context.data.session.cost(sessionID))
   } catch {
     errors.push("session-cost-failed")
   }
-  inspection.reportedCost = info.cost ?? null
+  inspection.reportedCost = safeNumber(info.cost)
   if (info.tokens) {
-    inspection.tokens = {
+    inspection.tokens = sanitizeTokens({
       input: info.tokens.input,
       output: info.tokens.output,
       reasoning: info.tokens.reasoning,
       cacheRead: info.tokens.cache.read,
       cacheWrite: info.tokens.cache.write,
-    }
+    })
   }
-  inspection.agent = info.agent ?? null
+  inspection.agent = info.agent ? safeIdentifier(info.agent) : null
 
   try {
     // The prompt's selection can drift from the model that actually ran.
     const current = context.ui.model.current()
-    if (current) inspection.selectedModel = { id: current.modelID, providerID: current.providerID, ...(current.variant ? { variant: current.variant } : {}) }
+    if (current) inspection.selectedModel = sanitizeModel({ id: current.modelID, providerID: current.providerID, ...(current.variant ? { variant: current.variant } : {}) })
   } catch {
     errors.push("model-selection-unavailable")
   }
   if (!inspection.selectedModel && info.model) {
-    inspection.selectedModel = { id: info.model.id, providerID: info.model.providerID, ...(info.model.variant ? { variant: info.model.variant } : {}) }
+    inspection.selectedModel = sanitizeModel({ id: info.model.id, providerID: info.model.providerID, ...(info.model.variant ? { variant: info.model.variant } : {}) })
   }
 
   let messages = context.data.session.message.list(sessionID)
@@ -455,21 +475,22 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     if (!message) continue
     if (message.type === "assistant") {
       if (!inspection.executedModel) {
-        inspection.executedModel = {
+        inspection.executedModel = sanitizeModel({
           id: message.model.id,
           providerID: message.model.providerID,
           ...(message.model.variant ? { variant: message.model.variant } : {}),
-        }
+        })
       }
-      if (!inspection.agent) inspection.agent = message.agent
+      if (!inspection.agent) inspection.agent = message.agent ? safeIdentifier(message.agent) : null
     }
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (!message || message.type !== "user") continue
-    if (typeof message.time?.created === "number") {
-      inspection.latestUserMessageAtMs = message.time.created
+    const created = safeInt(message.time?.created, 1)
+    if (created !== null) {
+      inspection.latestUserMessageAtMs = created
       inspection.latestUserMessageSource = "session.message.list[].type=user.time.created"
     }
     break

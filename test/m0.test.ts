@@ -37,7 +37,7 @@ afterEach(async () => {
   tempDirs.length = 0
 })
 
-function fakeContext(info: () => Promise<{ version: string; pid: number; hostname?: string; urls: string[] }>): Context {
+function fakeContext(info: () => Promise<{ version: string; pid: number; hostname?: string; urls: unknown[] }>): Context {
   return {
     app: { version: "2.3.0", channel: "test" },
     client: { server: { info } },
@@ -136,6 +136,34 @@ describe("locality classification", () => {
     expect(JSON.stringify(result)).not.toContain("some-remote-host")
   })
 
+  test("the whole advertised URL array is validated without filtering", async () => {
+    const cases: unknown[][] = [
+      ["http://127.0.0.1:1", null],
+      ["http://127.0.0.1:1", ""],
+      ["http://127.0.0.1:1", "   "],
+      ["http://127.0.0.1:1", 42],
+      ["http://127.0.0.1:1", "not a url"],
+      ["http://127.0.0.1:1", "http://10.0.0.2:1"],
+      ["http://127.0.0.1:1", "ftp://127.0.0.1"],
+      ["http://127.0.0.1:1", "http://user:password@127.0.0.1"],
+      Object.assign(new Array(2), { 0: "http://127.0.0.1:1" }),
+    ]
+    for (const urls of cases) {
+      const result = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls })))
+      expect(result.class).not.toBe("local")
+      expect(result.enrichment).toBe("refused")
+    }
+  })
+
+  test("valid IPv6 loopback is local and mixed loopback/non-loopback refuses", async () => {
+    const ipv6 = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: ["http://[::1]:1234"] })))
+    expect(ipv6.class).toBe("local")
+    expect(ipv6.enrichment).toBe("allowed")
+    const mixed = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: ["http://[::1]:1234", "http://10.0.0.2:1"] })))
+    expect(mixed.class).not.toBe("local")
+    expect(mixed.enrichment).toBe("refused")
+  })
+
   test("absent or empty identity is unknown, never local", async () => {
     const missing = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, urls: ["http://127.0.0.1:43173"] })))
     const emptyURLs = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: [] })))
@@ -202,7 +230,7 @@ describe("capture allowlist", () => {
   ]
 
   test("never serializes prompts, deltas, tool data, paths, forms, errors or credentials", () => {
-    const serialized = events.map((event, index) => JSON.stringify(captureEvent(event, "listen", index, "salt", Date.now(), "inst"))).join("\n")
+    const serialized = events.map((event, index) => JSON.stringify(captureEvent(event, "listen", index, "salt", Date.now(), "11111111-1111-4111-8111-111111111111"))).join("\n")
     for (const canary of canaries) expect(serialized).not.toContain(canary)
     expect(serialized).not.toContain("M0CANARY")
     expect(serialized).not.toContain("/home/levi")
@@ -210,7 +238,7 @@ describe("capture allowlist", () => {
   })
 
   test("unhandled data keys are not traversed at all", () => {
-    const captured = captureEvent(events[7], "listen", 1, "salt", Date.now(), "inst")
+    const captured = captureEvent(events[7], "listen", 1, "salt", Date.now(), "11111111-1111-4111-8111-111111111111")
     expect(captured).not.toBeNull()
     expect(captured?.fields.some(([path]) => path.includes("credentials"))).toBe(false)
     expect(captured?.fields.some(([path]) => path.includes("nested"))).toBe(false)
@@ -218,12 +246,12 @@ describe("capture allowlist", () => {
   })
 
   test("keeps allowlisted values and fixed structural paths", () => {
-    const status = captureEvent(events[5], "listen", 1, "salt", Date.now(), "inst")
+    const status = captureEvent(events[5], "listen", 1, "salt", Date.now(), "11111111-1111-4111-8111-111111111111")
     expect(status?.values).toEqual({ status: "retry", attempt: 2 })
     expect(status?.fields.some(([path]) => path === "data.status.type")).toBe(true)
-    const interrupted = captureEvent(events[6], "listen", 2, "salt", Date.now(), "inst")
+    const interrupted = captureEvent(events[6], "listen", 2, "salt", Date.now(), "11111111-1111-4111-8111-111111111111")
     expect(interrupted?.values).toEqual({ reason: "user" })
-    const tool = captureEvent(events[2], "listen", 3, "salt", Date.now(), "inst")
+    const tool = captureEvent(events[2], "listen", 3, "salt", Date.now(), "11111111-1111-4111-8111-111111111111")
     expect(tool?.values).toEqual({ executed: true })
     expect(tool?.fields.some(([path]) => path === "data.sessionID")).toBe(true)
     expect(tool?.fields.some(([path]) => path.startsWith("data.input"))).toBe(false)
@@ -232,7 +260,7 @@ describe("capture allowlist", () => {
   })
 
   test("runtime validation rejects extra keys and out-of-schema values", () => {
-    const base = captureEvent(events[5], "listen", 1, "salt", Date.now(), "inst")
+    const base = captureEvent(events[5], "listen", 1, "salt", Date.now(), "11111111-1111-4111-8111-111111111111")
     expect(base).not.toBeNull()
     expect(validateCaptureRecord({ ...base, injected: "x" })).toBe(false)
     expect(validateCaptureRecord({ ...base, values: { arbitrary: "M0CANARY" } })).toBe(false)
@@ -240,8 +268,8 @@ describe("capture allowlist", () => {
   })
 
   test("error records carry a fixed code and no exception text", () => {
-    const record = errorRecord("observer.error", "capture-listen-failed", "inst", "subscribe")
-    expect(record).toEqual({ v: 1, seq: 0, atMs: record.atMs, source: "subscribe", instanceId: "inst", type: "observer.error", code: "capture-listen-failed" })
+    const record = errorRecord("observer.error", "capture-listen-failed", "11111111-1111-4111-8111-111111111111", "subscribe")
+    expect(record).toEqual({ v: 1, seq: 0, atMs: record.atMs, source: "subscribe", instanceId: "11111111-1111-4111-8111-111111111111", type: "observer.error", code: "capture-listen-failed" })
     expect(JSON.stringify(record)).not.toContain("https://")
     expect(validateCaptureRecord(record)).toBe(true)
   })
@@ -443,11 +471,11 @@ describe("publisher owner and fence", () => {
     closers.push(() => first.stop())
     expect(first.start().status).toBe("acquired")
     expect(first.readAnchor(key)).toBeNull()
-    expect(first.commitAnchor(key, 1_750_000_000, 1_750_000_000_123)).toBe(true)
+    expect(first.markAcknowledged(key, 1_750_000_000, 1_750_000_000_123).ok).toBe(true)
     expect(first.readAnchor(key)).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123, committedMs: expect.any(Number) })
 
-    // A later commit must not move the first acknowledged anchor.
-    expect(first.commitAnchor(key, 1_760_000_000, 1_760_000_000_000)).toBe(true)
+    // A later conflicting commit must not move the first acknowledged anchor.
+    expect(first.markAcknowledged(key, 1_760_000_000, 1_760_000_000_000).ok).toBe(false)
     expect(first.readAnchor(key)?.seconds).toBe(1_750_000_000)
 
     const second = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
@@ -455,7 +483,7 @@ describe("publisher owner and fence", () => {
     const acquired = second.start()
     expect(acquired.status).toBe("contended")
     expect(second.readAnchor(key)?.seconds).toBe(1_750_000_000)
-    expect(second.commitAnchor("not-a-key", 1_750_000_000, 1_750_000_000_123)).toBe(false)
+    expect(second.markAcknowledged("not-a-key", 1_750_000_000, 1_750_000_000_123).ok).toBe(false)
   })
 
   test("failed attempt does not commit; a later success freezes the latest message and survives reload/takeover", async () => {
@@ -475,7 +503,7 @@ describe("publisher owner and fence", () => {
     // A later user message moves the candidate until the first success commits.
     const attempt2 = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_010_900)
     expect(attempt2).toEqual({ seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_900, committed: false })
-    expect(first.commitAnchor(key, 1_750_000_010, 1_750_000_010_900)).toBe(true)
+    expect(first.markAcknowledged(key, 1_750_000_010, 1_750_000_010_900).ok).toBe(true)
 
     // Later messages do not move a committed anchor.
     const later = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_999_000)
@@ -490,6 +518,122 @@ describe("publisher owner and fence", () => {
       sourceCreatedMs: 1_750_000_010_900,
       committed: true,
     })
+  })
+
+  test("reserves anchor intent in the transaction and never writes on conflict", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-intent")
+    const key = "c".repeat(64)
+    const publisher = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => publisher.stop())
+    expect(publisher.start().status).toBe("acquired")
+
+    let writes = 0
+    const first = publisher.criticalPublish(key, { seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123 }, () => {
+      writes += 1
+      return "first"
+    })
+    expect(first.ok).toBe(true)
+    expect(writes).toBe(1)
+    expect(publisher.readAnchorState(key).pending?.seconds).toBe(1_750_000_000)
+
+    const conflict = publisher.criticalPublish(key, { seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_123 }, () => {
+      writes += 1
+      return "second"
+    })
+    expect(conflict.ok).toBe(false)
+    if (!conflict.ok) expect(conflict.reason).toBe("anchor-pending")
+    expect(writes).toBe(1)
+
+    expect(publisher.markAcknowledged(key, 1_750_000_000, 1_750_000_000_123).ok).toBe(true)
+    expect(publisher.readAnchorState(key)).toMatchObject({ committed: { seconds: 1_750_000_000 }, pending: null })
+  })
+
+  test("an acknowledged anchor survives a persistence lock and is retried by the timer", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-ack-lock")
+    const key = "d".repeat(64)
+    const publisher = new Publisher({ runtimeDir: dir, backend, tickMs: 100, heartbeatMs: 200, staleMs: 1000 })
+    closers.push(() => publisher.stop())
+    expect(publisher.start().status).toBe("acquired")
+
+    const raw = backend.open(join(dir, "publisher.sqlite"))
+    raw.exec("BEGIN IMMEDIATE")
+    const failed = publisher.markAcknowledged(key, 1_750_000_000, 1_750_000_000_123)
+    expect(failed.ok).toBe(false)
+    expect(publisher.readAnchorState(key).acknowledgedUnpersisted).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123 })
+    raw.exec("COMMIT")
+    raw.close()
+
+    const deadline = Date.now() + 4000
+    while (!publisher.readAnchor(key) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(publisher.readAnchor(key)?.seconds).toBe(1_750_000_000)
+    expect(publisher.readAnchorState(key).acknowledgedUnpersisted).toBeNull()
+  })
+
+  test("a conflicting stored anchor is never overwritten", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-conflict")
+    const key = "e".repeat(64)
+    const publisher = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => publisher.stop())
+    expect(publisher.start().status).toBe("acquired")
+    expect(publisher.markAcknowledged(key, 1_750_000_000, 1_750_000_000_123).ok).toBe(true)
+    expect(publisher.markAcknowledged(key, 1_760_000_000, 1_760_000_000_123).ok).toBe(false)
+    expect(publisher.readAnchor(key)?.seconds).toBe(1_750_000_000)
+  })
+
+  test("an ACK conflict stays unresolved and blocks a newer anchor", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) throw new Error("SQLite unavailable")
+    const publisher = new Publisher({ runtimeDir: tempDir("pub-conflict-ack"), backend })
+    closers.push(() => publisher.stop())
+    publisher.start()
+    const key = "f".repeat(64)
+    expect(publisher.markAcknowledged(key, 1_750_000_010, 1_750_000_010_123).ok).toBe(true)
+    expect(publisher.markAcknowledged(key, 1_750_000_000, 1_750_000_000_123)).toEqual({ ok: false, code: "anchor-conflict" })
+    expect(publisher.readAnchorState(key).acknowledgedUnpersisted?.seconds).toBe(1_750_000_000)
+    let writes = 0
+    expect(publisher.criticalPublish(key, { seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_123 }, () => ++writes).ok).toBe(false)
+    expect(writes).toBe(0)
+  })
+
+  test("intent is durable before enqueue and a later transaction failure retains RPC correlation", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) throw new Error("SQLite unavailable")
+    let failCommit = false
+    const publisher = new Publisher({
+      runtimeDir: tempDir("pub-durable-before-send"),
+      backend: {
+        kind: backend.kind,
+        open(path) {
+          const db = backend.open(path)
+          return {
+            ...db,
+            exec(sql) {
+              if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("synthetic commit I/O failure") }
+              db.exec(sql)
+            },
+          }
+        },
+      },
+    })
+    closers.push(() => publisher.stop())
+    publisher.start()
+    const key = "9".repeat(64)
+    const observer = backend.open(publisher.dbPath)
+    closers.push(() => observer.close())
+    const result = publisher.criticalPublish(key, { seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123 }, () => {
+      expect(observer.get<{ seconds: number }>("SELECT seconds FROM anchor_pending")?.seconds).toBe(1_750_000_000)
+      failCommit = true
+      return { nonce: "retained-request" }
+    })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.value.nonce).toBe("retained-request")
+    expect(publisher.readAnchorState(key).pending?.seconds).toBe(1_750_000_000)
   })
 
   test("takes over only after the stale window and moves the fence forward", async () => {

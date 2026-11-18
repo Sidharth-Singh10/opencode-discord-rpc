@@ -12,6 +12,7 @@ import { join } from "node:path"
 import type { Context } from "@opencode/plugin/tui/plugin"
 
 import { pseudonym } from "./probe.js"
+import { safeIdentifier, safeUuid, sanitizeLocality, sanitizeProbe, sanitizePublication, sanitizePublisherEvent, sanitizeRun, sanitizeSnapshot } from "./sanitize.js"
 
 export interface EvidenceOptions {
   dir: string
@@ -34,6 +35,8 @@ export class EvidenceLog {
   private readonly maxBytes: number
   private readonly sinks = new Map<string, SinkState>()
   private ready: Promise<void> | null = null
+  private closed = false
+  private closing: Promise<void> | null = null
 
   constructor(options: EvidenceOptions) {
     this.dir = options.dir
@@ -50,16 +53,25 @@ export class EvidenceLog {
 
   /** Overwrite a single JSON document (run.json, snapshot-*.json). */
   async writeJson(name: string, value: unknown): Promise<void> {
-    await this.init()
-    await writeFile(join(this.dir, this.guardName(name)), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+    if (this.closed) return
+    const safe = projectEvidence(name, value)
+    if (!safe) return
+    const file = this.guardName(name)
+    const content = JSON.stringify(safe, null, 2) + "\n"
+    const sink = this.sink(file)
+    sink.chain = sink.chain.then(() => writeFile(join(this.dir, file), content, { mode: 0o600 })).catch(() => {})
+    await sink.chain
   }
 
   /** Queue one JSONL line. Never throws and never blocks the TUI. */
   append(name: string, entry: unknown): void {
+    if (this.closed) return
+    const safe = projectEvidence(name, entry)
+    if (!safe) return
     const file = this.guardName(name)
     let serialized: string
     try {
-      serialized = JSON.stringify(entry)
+      serialized = JSON.stringify(safe)
     } catch {
       return
     }
@@ -85,8 +97,9 @@ export class EvidenceLog {
   }
 
   async close(): Promise<void> {
-    await this.init()
-    await Promise.all([...this.sinks.values()].map((sink) => sink.chain))
+    this.closed = true
+    this.closing ??= Promise.all([...this.sinks.values()].map((sink) => sink.chain)).then(() => undefined)
+    await this.closing
   }
 
   private sink(file: string): SinkState {
@@ -112,9 +125,74 @@ type PrimitiveType = "string" | "number" | "boolean" | "object" | "array" | "nul
 
 const PRIMITIVE_TYPES: ReadonlySet<PrimitiveType> = new Set(["string", "number", "boolean", "object", "array", "null"])
 const SAFE_PATH = /^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/
-const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 /** Fixed per-type structural paths. Unknown types get only the common envelope. */
+const KNOWN_TYPES = new Set([
+  "agent.updated",
+  "command.updated",
+  "form.cancelled",
+  "form.created",
+  "form.replied",
+  "integration.updated",
+  "location.shutdown",
+  "model.updated",
+  "permission.asked",
+  "permission.replied",
+  "plugin.updated",
+  "project.updated",
+  "provider.updated",
+  "reference.updated",
+  "server.connected",
+  "session.agent.selected",
+  "session.compaction.delta",
+  "session.compaction.ended",
+  "session.compaction.failed",
+  "session.compaction.started",
+  "session.created",
+  "session.deleted",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.idle",
+  "session.inbox.cancelled",
+  "session.inbox.delivered",
+  "session.inbox.delivery.changed",
+  "session.inbox.enqueued",
+  "session.instructions.updated",
+  "session.message.content.updated",
+  "session.metadata.updated",
+  "session.model.selected",
+  "session.reasoning.delta",
+  "session.reasoning.ended",
+  "session.reasoning.started",
+  "session.renamed",
+  "session.retry.scheduled",
+  "session.status",
+  "session.step.ended",
+  "session.step.failed",
+  "session.step.first-token",
+  "session.step.started",
+  "session.step.streamed",
+  "session.text.delta",
+  "session.text.ended",
+  "session.text.started",
+  "session.tool.called",
+  "session.tool.failed",
+  "session.tool.input.delta",
+  "session.tool.input.ended",
+  "session.tool.input.started",
+  "session.tool.progress",
+  "session.tool.success",
+  "session.usage.updated",
+  "session.viewed",
+  "shell.created",
+  "shell.deleted",
+  "shell.exited",
+  "skill.updated",
+  "websearch.updated",
+])
+
 const EVENT_SHAPES: Readonly<Record<string, readonly string[]>> = {
   "session.execution.started": ["data.sessionID"],
   "session.execution.succeeded": ["data.sessionID"],
@@ -203,10 +281,6 @@ function structuralFields(event: Record<string, unknown>): Array<[string, Primit
   return fields
 }
 
-function safeIdentifier(value: unknown): string | null {
-  return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : null
-}
-
 function allowedValues(type: string, data: Record<string, unknown>): Record<string, string | number | boolean> {
   const values: Record<string, string | number | boolean> = {}
   const status = data.status as Record<string, unknown> | undefined
@@ -270,12 +344,13 @@ export function validateCaptureRecord(value: unknown): value is CaptureRecord {
   const record = value as Record<string, unknown>
   if (record.v !== 1 || typeof record.atMs !== "number" || !Number.isSafeInteger(record.atMs)) return false
   if (record.source !== "listen" && record.source !== "subscribe") return false
-  if (typeof record.instanceId !== "string" || record.instanceId.length === 0) return false
-  if (typeof record.type !== "string" || record.type.length === 0 || record.type.length > 80) return false
+  if (!safeUuid(record.instanceId) && record.instanceId !== "instance") return false
+  if (typeof record.type !== "string") return false
   if (ERROR_KEYS.has("code") && "code" in record) {
     for (const key of Object.keys(record)) if (!ERROR_KEYS.has(key)) return false
-    return typeof record.code === "string" && ERROR_CODES.has(record.code)
+    return record.seq === 0 && (ERROR_TYPES.has(record.type) || record.type === "event.other") && typeof record.code === "string" && ERROR_CODES.has(record.code)
   }
+  if (!KNOWN_TYPES.has(record.type) && record.type !== "event.other") return false
   for (const key of Object.keys(record)) if (!CAPTURE_KEYS.has(key)) return false
   if (record.seq === undefined || typeof record.seq !== "number" || !Number.isSafeInteger(record.seq) || record.seq < 0) return false
   for (const key of ["eventIDHash", "sessionHash", "locationHash"] as const) {
@@ -296,7 +371,7 @@ export function validateCaptureRecord(value: unknown): value is CaptureRecord {
     if (!allowedValueKeys.has(key)) return false
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return false
     if (typeof value === "number" && !Number.isFinite(value)) return false
-    if (typeof value === "string" && !SAFE_IDENTIFIER.test(value)) return false
+    if (typeof value === "string" && ["providerID", "modelID", "agentID"].includes(key) && !safeIdentifier(value)) return false
     if (typeof value === "string" && key === "reason" && !["user", "shutdown", "superseded", "inactivity", "auto", "manual"].includes(value)) return false
     if (typeof value === "string" && key === "status" && !["idle", "retry"].includes(value)) return false
     if (typeof value === "string" && key === "reply" && !["once", "always", "reject"].includes(value)) return false
@@ -322,19 +397,20 @@ export function captureEvent(
   const eventID = typeof record.id === "string" ? record.id : null
   const createdAt = typeof record.created === "number" && Number.isSafeInteger(record.created) ? record.created : null
 
+  const type = KNOWN_TYPES.has(record.type) ? record.type : "event.other"
   const captured: CapturedEvent = {
     v: 1,
     seq,
     atMs: now,
     source,
     instanceId,
-    type: record.type,
+    type,
     eventIDHash: eventID ? pseudonym(salt, eventID) : null,
     sessionHash: sessionID ? pseudonym(salt, sessionID) : null,
     locationHash: location && typeof location.directory === "string" ? pseudonym(salt, location.directory) : null,
     eventCreatedMs: createdAt,
-    fields: structuralFields(record),
-    values: allowedValues(record.type, data),
+    fields: structuralFields({ ...record, type }),
+    values: allowedValues(type, data),
   }
   return validateCaptureRecord(captured) ? captured : null
 }
@@ -360,9 +436,45 @@ export function captureReference(event: unknown, seq: number, salt: string, now:
   return captured ? referenceRecord(captured) : null
 }
 
+const ERROR_TYPES = new Set(["command.registration.failed", "capture.start.failed", "capture.listen.error", "snapshot.startup.failed", "observer.error"])
+
 export function errorRecord(type: string, code: string, instanceId: string, source: CaptureSource = "listen"): CaptureErrorRecord {
   const safeCode = ERROR_CODES.has(code) ? code : "capture-invalid"
-  return { v: 1, seq: 0, atMs: Date.now(), source, instanceId, type, code: safeCode }
+  const safeType = ERROR_TYPES.has(type) ? type : "event.other"
+  return { v: 1, seq: 0, atMs: Date.now(), source, instanceId: safeUuid(instanceId) ?? "instance", type: safeType, code: safeCode }
+}
+
+/** Last boundary before serialization. No sink accepts unchecked caller data. */
+function projectEvidence(name: string, value: unknown): Record<string, unknown> | CaptureRecord | null {
+  if (name === "probe.json") return sanitizeProbe(value)
+  if (name === "locality.json") return sanitizeLocality(value)
+  if (name === "run.json") return sanitizeRun(value)
+  if (name === "snapshot.json" || /^snapshot-[0-9a-f-]+\.json$/i.test(name)) return sanitizeSnapshot(value)
+  if (name === "publication.jsonl") return sanitizePublication(value)
+  if (/^publisher-[0-9a-f-]+\.jsonl$/i.test(name)) return sanitizePublisherEvent(value)
+  if (name === "capture.jsonl" && validateCaptureRecord(value)) {
+    if ("code" in value) return errorRecord(value.type, value.code, value.instanceId, value.source)
+    return {
+      v: 1, seq: value.seq, atMs: value.atMs, source: value.source, instanceId: value.instanceId, type: value.type,
+      eventIDHash: value.eventIDHash, sessionHash: value.sessionHash, locationHash: value.locationHash,
+      eventCreatedMs: value.eventCreatedMs,
+      fields: value.fields.map(([path, type]) => [path, type]),
+      values: Object.fromEntries(Object.entries(value.values)),
+    }
+  }
+  if (name === "reference.jsonl" && value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    if (record.source !== "subscribe") return null
+    if ("code" in record) {
+      const diagnostic: unknown = record
+      return validateCaptureRecord(diagnostic) && "code" in diagnostic ? errorRecord(diagnostic.type, diagnostic.code, diagnostic.instanceId, "subscribe") : null
+    }
+    const allowed = new Set(["v", "seq", "atMs", "source", "instanceId", "type", "eventIDHash", "sessionHash", "locationHash", "eventCreatedMs"])
+    if (Object.keys(record).some((key) => !allowed.has(key))) return null
+    const full = { ...record, fields: [], values: {} }
+    return validateCaptureRecord(full) ? referenceRecord(full as CapturedEvent) : null
+  }
+  return null
 }
 
 export interface CaptureController {
@@ -404,16 +516,19 @@ export function startCapture(
 
   return {
     onListen(event: unknown) {
+      if (stopped) return
       listenSeq += 1
       const captured = captureEvent(event, "listen", listenSeq, options.salt, Date.now(), options.instanceId)
       if (captured) log.append("capture.jsonl", captured)
     },
     onReference(event: unknown) {
+      if (stopped) return
       referenceSeq += 1
       const record = captureReference(event, referenceSeq, options.salt, Date.now(), options.instanceId)
       if (record) log.append("reference.jsonl", record)
     },
     notify(type: string, code: string) {
+      if (stopped) return
       log.append("capture.jsonl", errorRecord(type, code, options.instanceId))
     },
     referenceTask,

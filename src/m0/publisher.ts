@@ -52,7 +52,7 @@ export type RevokeReason = "fence-changed" | "owner-row-gone" | "release-fence-m
 
 export type CriticalResult<T> =
   | { ok: true; value: T; fence: number }
-  | { ok: false; reason: "not-owner" | "revoked" | "busy" | "no-store" | "error" }
+  | { ok: false; reason: "not-owner" | "revoked" | "busy" | "no-store" | "error" | "anchor-conflict" | "anchor-pending" }
 
 export interface PublisherEvent {
   kind: "acquire" | "renew" | "takeover" | "contended" | "release" | "revoke" | "critical" | "error"
@@ -85,6 +85,22 @@ export interface Anchor {
   committedMs: number
 }
 
+export interface PendingAnchor {
+  seconds: number
+  sourceCreatedMs: number
+  intentMs: number
+}
+
+export interface AnchorState {
+  committed: Anchor | null
+  pending: PendingAnchor | null
+  acknowledgedUnpersisted: { seconds: number; sourceCreatedMs: number } | null
+}
+
+export type AnchorCommitResult =
+  | { ok: true; stored: Anchor }
+  | { ok: false; code: "anchor-conflict" | "anchor-persist-failed" }
+
 const OWNER_COLUMNS = "instance_id, pid, generation, fence, acquired_ms, heartbeat_ms"
 const SESSION_KEY = /^[0-9a-f]{64}$/
 
@@ -103,6 +119,7 @@ export class Publisher {
   private revoked = false
   private closed = false
   private paused = false
+  private readonly unpersisted = new Map<string, { seconds: number; sourceCreatedMs: number }>()
 
   constructor(options: PublisherOptions) {
     this.options = {
@@ -148,14 +165,85 @@ export class Publisher {
   tick(): Acquisition | null {
     if (this.closed || this.revoked || this.paused) return null
     if (!this.openStore()) return { status: "error", code: "store-unavailable" }
+    this.retryPersistence()
     const result = this.owned ? this.renew() : this.tryAcquire()
     if (result.status === "revoked") this.revoke(result.reason)
     return result
   }
 
+  /**
+   * Fenced publication with durable pending intent. The intended anchor is
+   * committed before the socket write, then rechecked inside the synchronous
+   * owner/fence + enqueue transaction. Even a failed second COMMIT cannot
+   * erase the durable reservation for an already-sent operation.
+   */
+  criticalPublish<T>(sessionKey: string, intended: { seconds: number; sourceCreatedMs: number }, enqueue: () => T): CriticalResult<T> {
+    if (!SESSION_KEY.test(sessionKey)) return { ok: false, reason: "anchor-conflict" }
+    if (!Number.isSafeInteger(intended.seconds) || intended.seconds < 1_000_000_000 ||
+        !Number.isSafeInteger(intended.sourceCreatedMs) || intended.seconds !== Math.floor(intended.sourceCreatedMs / 1000)) {
+      return { ok: false, reason: "anchor-conflict" }
+    }
+    if (!this.storeReady || !this.db) return { ok: false, reason: "no-store" }
+    if (this.revoked || this.closed) return { ok: false, reason: "revoked" }
+    const acknowledged = this.unpersisted.get(sessionKey)
+    if (acknowledged && (acknowledged.seconds !== intended.seconds || acknowledged.sourceCreatedMs !== intended.sourceCreatedMs)) return { ok: false, reason: "anchor-conflict" }
+    try {
+      this.db.exec("BEGIN IMMEDIATE")
+    } catch {
+      return { ok: false, reason: "busy" }
+    }
+    try {
+      const owner = this.readOwner()
+      if (!this.matches(owner)) {
+        this.db.exec("ROLLBACK")
+        this.emit({ kind: "critical", reason: "fence-mismatch", fence: owner?.fence })
+        this.revoke("fence-mismatch")
+        return { ok: false, reason: "not-owner" }
+      }
+      const committed = this.readAnchorRow(sessionKey)
+      const pending = this.readPendingRow(sessionKey)
+      if (committed && (committed.seconds !== intended.seconds || committed.sourceCreatedMs !== intended.sourceCreatedMs)) {
+        this.db.exec("ROLLBACK")
+        return { ok: false, reason: "anchor-conflict" }
+      }
+      if (pending && (pending.seconds !== intended.seconds || pending.sourceCreatedMs !== intended.sourceCreatedMs)) {
+        this.db.exec("ROLLBACK")
+        return { ok: false, reason: "anchor-pending" }
+      }
+      if (!committed && !pending) {
+        this.db.run(
+          "INSERT INTO anchor_pending (session_key, seconds, source_created_ms, intent_ms) VALUES (?, ?, ?, ?)",
+          sessionKey,
+          intended.seconds,
+          intended.sourceCreatedMs,
+          this.options.now(),
+        )
+      }
+      this.db.exec("COMMIT")
+    } catch {
+      try {
+        this.db.exec("ROLLBACK")
+      } catch {
+        // Already rolled back.
+      }
+      this.emit({ kind: "error", code: "critical-failed" })
+      return { ok: false, reason: "error" }
+    }
+    return this.criticalEnqueue(() => {
+      const committed = this.readAnchorRow(sessionKey)
+      const pending = this.readPendingRow(sessionKey)
+      if ((!committed && !pending) || [committed, pending].some((row) =>
+        row && (row.seconds !== intended.seconds || row.sourceCreatedMs !== intended.sourceCreatedMs))) {
+        throw new Error("anchor conflict")
+      }
+      return enqueue()
+    })
+  }
+
   criticalEnqueue<T>(enqueue: () => T): CriticalResult<T> {
     if (!this.storeReady || !this.db) return { ok: false, reason: "no-store" }
     if (this.revoked || this.closed) return { ok: false, reason: "revoked" }
+    let enqueued: { value: T } | null = null
     try {
       this.db.exec("BEGIN IMMEDIATE")
     } catch {
@@ -179,6 +267,7 @@ export class Publisher {
       // Synchronous only. This is the guarantee boundary: once this returns,
       // the frame is handed to the OS and cannot be recalled.
       const value = enqueue()
+      enqueued = { value }
       this.db.exec("COMMIT")
       this.emit({ kind: "critical", fence: this.fence })
       return { ok: true, value, fence: this.fence }
@@ -189,6 +278,13 @@ export class Publisher {
         // The transaction may already be gone.
       }
       this.emit({ kind: "error", code: "critical-failed" })
+      // Bytes already handed to the OS cannot be reclassified as a refusal.
+      // The independently committed intent survives rollback; return the
+      // request so ACK/timeout/closure is still reconciled and evidenced.
+      if (enqueued) {
+        this.emit({ kind: "critical", fence: this.fence })
+        return { ok: true, value: enqueued.value, fence: this.fence }
+      }
       return { ok: false, reason: "error" }
     }
   }
@@ -257,37 +353,117 @@ export class Publisher {
   readAnchor(sessionKey: string): Anchor | null {
     if (!SESSION_KEY.test(sessionKey) || !this.openStore() || !this.db) return null
     try {
-      const row = this.db.get<{ seconds: number; source_created_ms: number; committed_ms: number }>(
-        "SELECT seconds, source_created_ms, committed_ms FROM anchor WHERE session_key = ?",
-        sessionKey,
-      )
-      if (!row || !Number.isSafeInteger(row.seconds) || !Number.isSafeInteger(row.source_created_ms)) return null
-      return { seconds: row.seconds, sourceCreatedMs: row.source_created_ms, committedMs: row.committed_ms }
+      return this.readAnchorRow(sessionKey)
     } catch {
       return null
     }
   }
 
-  /**
-   * Commit an anchor after an acknowledged publication. INSERT OR IGNORE keeps
-   * the first successful anchor for a session; a failed send never reaches here.
-   */
-  commitAnchor(sessionKey: string, seconds: number, sourceCreatedMs: number): boolean {
-    if (!SESSION_KEY.test(sessionKey)) return false
-    if (!Number.isSafeInteger(seconds) || seconds < 1_000_000_000 || !Number.isSafeInteger(sourceCreatedMs) || sourceCreatedMs <= 0) return false
-    if (!this.openStore() || !this.db) return false
+  readAnchorState(sessionKey: string): AnchorState {
+    if (!SESSION_KEY.test(sessionKey) || !this.openStore() || !this.db) {
+      return { committed: null, pending: null, acknowledgedUnpersisted: null }
+    }
     try {
+      return {
+        committed: this.readAnchorRow(sessionKey),
+        pending: this.readPendingRow(sessionKey),
+        acknowledgedUnpersisted: this.unpersisted.get(sessionKey) ?? null,
+      }
+    } catch {
+      return { committed: null, pending: null, acknowledgedUnpersisted: this.unpersisted.get(sessionKey) ?? null }
+    }
+  }
+
+  /**
+   * Record an ACK first, then attempt durable reconciliation. A failed write
+   * leaves the anchor in memory (and the durable pending intent) so no newer
+   * anchor can be published; the ticker retries.
+   */
+  markAcknowledged(sessionKey: string, seconds: number, sourceCreatedMs: number): AnchorCommitResult {
+    if (!SESSION_KEY.test(sessionKey)) return { ok: false, code: "anchor-persist-failed" }
+    if (!Number.isSafeInteger(seconds) || seconds < 1_000_000_000 || !Number.isSafeInteger(sourceCreatedMs) || seconds !== Math.floor(sourceCreatedMs / 1000)) {
+      return { ok: false, code: "anchor-persist-failed" }
+    }
+    const existing = this.unpersisted.get(sessionKey)
+    if (existing && (existing.seconds !== seconds || existing.sourceCreatedMs !== sourceCreatedMs)) return { ok: false, code: "anchor-conflict" }
+    this.unpersisted.set(sessionKey, { seconds, sourceCreatedMs })
+    return this.persistAcknowledged(sessionKey)
+  }
+
+  private persistAcknowledged(sessionKey: string): AnchorCommitResult {
+    const acknowledged = this.unpersisted.get(sessionKey)
+    if (!acknowledged) return { ok: false, code: "anchor-persist-failed" }
+    if (!this.openStore() || !this.db) return { ok: false, code: "anchor-persist-failed" }
+    try {
+      this.db.exec("BEGIN IMMEDIATE")
+    } catch {
+      return { ok: false, code: "anchor-persist-failed" }
+    }
+    try {
+      const committed = this.readAnchorRow(sessionKey)
+      const pending = this.readPendingRow(sessionKey)
+      if (pending && (pending.seconds !== acknowledged.seconds || pending.sourceCreatedMs !== acknowledged.sourceCreatedMs)) {
+        this.db.exec("ROLLBACK")
+        return { ok: false, code: "anchor-conflict" }
+      }
+      if (committed) {
+        if (committed.seconds !== acknowledged.seconds || committed.sourceCreatedMs !== acknowledged.sourceCreatedMs) {
+          this.db.exec("ROLLBACK")
+          return { ok: false, code: "anchor-conflict" }
+        }
+        this.db.run("DELETE FROM anchor_pending WHERE session_key = ?", sessionKey)
+        this.db.exec("COMMIT")
+        this.unpersisted.delete(sessionKey)
+        return { ok: true, stored: committed }
+      }
       this.db.run(
-        "INSERT OR IGNORE INTO anchor (session_key, seconds, source_created_ms, committed_ms) VALUES (?, ?, ?, ?)",
+        "INSERT INTO anchor (session_key, seconds, source_created_ms, committed_ms) VALUES (?, ?, ?, ?)",
         sessionKey,
-        seconds,
-        sourceCreatedMs,
+        acknowledged.seconds,
+        acknowledged.sourceCreatedMs,
         this.options.now(),
       )
-      return true
+      const stored = this.readAnchorRow(sessionKey)
+      if (!stored || stored.seconds !== acknowledged.seconds || stored.sourceCreatedMs !== acknowledged.sourceCreatedMs) {
+        this.db.exec("ROLLBACK")
+        return { ok: false, code: "anchor-persist-failed" }
+      }
+      this.db.run("DELETE FROM anchor_pending WHERE session_key = ?", sessionKey)
+      this.db.exec("COMMIT")
+      this.unpersisted.delete(sessionKey)
+      return { ok: true, stored }
     } catch {
-      return false
+      try {
+        this.db.exec("ROLLBACK")
+      } catch {
+        // Already rolled back.
+      }
+      return { ok: false, code: "anchor-persist-failed" }
     }
+  }
+
+  private retryPersistence(): void {
+    for (const key of [...this.unpersisted.keys()]) this.persistAcknowledged(key)
+  }
+
+  private readAnchorRow(sessionKey: string): Anchor | null {
+    if (!this.db) return null
+    const row = this.db.get<{ seconds: number; source_created_ms: number; committed_ms: number }>(
+      "SELECT seconds, source_created_ms, committed_ms FROM anchor WHERE session_key = ?",
+      sessionKey,
+    )
+    if (!row || !Number.isSafeInteger(row.seconds) || !Number.isSafeInteger(row.source_created_ms)) return null
+    return { seconds: row.seconds, sourceCreatedMs: row.source_created_ms, committedMs: row.committed_ms }
+  }
+
+  private readPendingRow(sessionKey: string): PendingAnchor | null {
+    if (!this.db) return null
+    const row = this.db.get<{ seconds: number; source_created_ms: number; intent_ms: number }>(
+      "SELECT seconds, source_created_ms, intent_ms FROM anchor_pending WHERE session_key = ?",
+      sessionKey,
+    )
+    if (!row || !Number.isSafeInteger(row.seconds) || !Number.isSafeInteger(row.source_created_ms)) return null
+    return { seconds: row.seconds, sourceCreatedMs: row.source_created_ms, intentMs: row.intent_ms }
   }
 
   private openStore(): boolean {
@@ -361,6 +537,12 @@ export class Publisher {
         seconds INTEGER NOT NULL,
         source_created_ms INTEGER NOT NULL,
         committed_ms INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS anchor_pending (
+        session_key TEXT PRIMARY KEY,
+        seconds INTEGER NOT NULL,
+        source_created_ms INTEGER NOT NULL,
+        intent_ms INTEGER NOT NULL
       );
     `)
     this.db.run("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", "fence", "0")

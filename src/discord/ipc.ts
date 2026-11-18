@@ -256,6 +256,7 @@ export class DiscordIpc {
   }
 
   private handleData(chunk: Buffer): void {
+    if (this.closed) return
     let frames: DecodedFrame[]
     try {
       frames = this.decoder.push(chunk)
@@ -290,7 +291,7 @@ export class DiscordIpc {
   private handleFrame(payload: unknown): void {
     if (!payload || typeof payload !== "object") return
     const message = payload as RpcReply
-    if (message.evt === "READY") {
+    if (message.evt === "READY" && message.cmd === "DISPATCH" && !message.nonce) {
       this.ready = true
       this.readyResolve?.()
       return
@@ -306,7 +307,7 @@ export class DiscordIpc {
     }
     if (message.nonce) {
       const pending = this.pending.get(message.nonce)
-      if (pending) {
+      if (pending && message.cmd === pending.cmd && message.evt === null) {
         this.pending.delete(message.nonce)
         clearTimeout(pending.timer)
         pending.resolve(message)

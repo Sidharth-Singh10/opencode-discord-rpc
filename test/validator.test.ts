@@ -216,7 +216,7 @@ describe("M0 evidence validator", () => {
     )
     expectFail("publication after revocation", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
-        const record = records.find((entry) => entry.attempt === "command-publish" && entry.rpcOk && entry.instanceId === "22222222-2222-4222-8222-222222222222")
+        const record = records.find((entry) => entry.attempt === "command-publish" && entry.rpcOk && entry.instanceId === "11111111-1111-4111-8111-111111111111")
         record.at = new Date(1_750_000_000_000 + 10_500).toISOString()
       }),
     )

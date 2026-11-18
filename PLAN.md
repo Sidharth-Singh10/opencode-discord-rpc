@@ -38,7 +38,7 @@ events-only.
 |---|---|
 | Stack | TypeScript, single package |
 | Build | `bun build` → bundled ESM; `bun test` |
-| Distribution | published npm package (`0.0.1` only after the M0 packed-artifact test) |
+| Distribution | published npm package (`0.0.1` only after Jury acceptance and explicit user authorization) |
 | npm name | `opencode-presence-discord` (verified free) |
 | First surface | TUI part only (`./tui`), installed via `cli.json` |
 | Discord client ID | `1572459187873783838` (public; overridable per user) |
@@ -214,11 +214,28 @@ Two independent problems, two mechanisms.
 1. **Who publishes.** `$XDG_RUNTIME_DIR/opencode-presence-discord/publisher.json`
    with `{pid, instanceId, hostname, startedAt, lastActivity, fence}`; atomic
    tmp+rename; 2 s heartbeat; 10 s staleness; takeover increments `fence`. Only the
-   current fence holder may push or clear. Suspend/resume is covered by a fencing test.
+   current fence holder may push or clear. Suspend/resume fencing is tested only
+   at the points labelled in the suspension limitation below.
 2. **Which session wins.** Candidates carry a server-qualified identity
    (`serverID + location + sessionID`); busy beats idle; then most recent activity;
    the incumbent keeps the card unless the challenger is ≥ 10 s newer. New processes
    start at `lastActivity = 0`, so launching a terminal never steals focus.
+
+**Suspension limitation:** the guarantee is transactional ownership/fence
+checking around synchronous enqueue, with serialized publication/ACK
+reconciliation. It is **not** bounded takeover under arbitrary suspension. A
+publisher stopped inside its SQLite write transaction can hold the writer lock
+until it resumes or dies; lease expiry does not release it, and other instances
+must fail closed. No unconditional takeover deadline is advertised or claimed.
+
+**Tested suspension points:** the packed test suspends only after publication
+completes — after the first publication has returned from ACK and its failed
+persistence reconciliation, before the next publication — and kills after the
+contender's publication has returned. Neither point deliberately suspends
+inside an ownership/heartbeat transaction. The source subprocess lock-delay test
+holds the write lock in a separate locker process; it demonstrates lock-delayed
+takeover, not a publisher instrumented mid-transaction. There are no bundle test
+hooks.
 
 Auto-clear on the last publisher exit (SIGTERM/SIGINT with re-raise, and clean
 dispose). A crashed publisher is cleared after the stale window.
@@ -319,7 +336,10 @@ Current `package.json` reflects §2: `type: module`, `exports: {"./tui": "./dist
 - Host packages (`@opencode/plugin`, OpenTUI, Solid, `@opencode/client`) stay
   **external** in the bundle; only our modules are bundled.
 - Publish flow: `bun test` → `bun build` → `npm pack` → install the **packed
-  artifact** into an isolated config → verify load and IPC → `npm publish`.
+  artifact** into an isolated config → verify load and IPC → request explicit user
+  authorization → `npm publish`. Passing the gates or completing the packed-artifact
+  checks never publishes automatically; `npm publish` requires Jury acceptance and
+  an explicit user instruction after that acceptance.
 - Versioning: `0.x` through M5; each milestone independently installable.
 - Loader hazards to test, not assume: a plugin dir whose entrypoint is a symlink or
   escapes the dir can be silently dropped since 2.2.0; a local `package.json` with
@@ -329,7 +349,7 @@ Current `package.json` reflects §2: `type: module`, `exports: {"./tui": "./dist
 
 ## 13. Milestones and acceptance criteria
 
-### M0 — Prove it (gate for publishing)
+### M0 — Prove it (release-readiness gate)
 
 1. Bun installed; scaffold builds one bundled ESM `./tui`.
 2. The packed artifact installs and loads on OpenCode 2.3.0 from `cli.json` with no
@@ -338,11 +358,15 @@ Current `package.json` reflects §2: `type: module`, `exports: {"./tui": "./dist
    cancellation, reconnect, `location.shutdown`.
 4. Thin slice: events → state → `SET_ACTIVITY` with real `assets` and a real
    session-anchored timestamp, verified in a live Discord client.
-5. Two processes → exactly one publisher; fenced takeover after kill/suspend/resume.
+5. Two processes → exactly one publisher; fenced takeover after kill/suspend/resume
+   at the tested suspension points in §8 (not bounded takeover under arbitrary
+   suspension).
 6. Remote-server integration is **descoped from M0** and remains unverified:
    unknown identity refuses local-DB enrichment and continues events-only.
    A genuine remote endpoint must be tested before remote support is claimed.
-7. Publish `0.0.1` only after the M1–M6 gates and the human visual check pass.
+7. `0.0.1` publication requires Jury acceptance, the human visual check and
+   explicit user authorization. Passing the M1–M6 gates does not authorize or
+   trigger publication.
 
 Fallback if `node:net` is unavailable in the TUI host: `Bun.spawn` a socket-owning
 helper. Same package, one extra entrypoint.
@@ -394,7 +418,7 @@ manifest; `0.1.0` tag; optional footer indicator; Desktop GUI part deferred.
 | Rate limit / dropped updates | Floor + dedupe + post-clear guard; verify empirically |
 | Large DB reads, WAL contention | Read-only, short statements, busy_timeout, no per-event queries |
 | Election races on suspend/resume | Fence tokens + two-process test |
-| npm publishing needs auth | User runs `npm login`; publish after M0 |
+| npm publishing needs auth | User runs `npm login`; publication requires Jury acceptance and explicit user authorization |
 
 Open: whether the TUI part can see a server identity sufficient to qualify remote
 sessions (M0 test 6); whether `session.cost()` matches `session_v2.cost`; whether

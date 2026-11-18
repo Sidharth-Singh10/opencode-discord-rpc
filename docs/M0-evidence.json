@@ -15,17 +15,43 @@
     "arch": "x64"
   },
   "imports": {
-    "node:net": { "ok": true, "createConnection": true },
-    "bun:sqlite": { "ok": true, "selectOne": 1 },
-    "node:sqlite": { "ok": true, "selectOne": 1 }
+    "node:net": {
+      "ok": true,
+      "createConnection": true
+    },
+    "bun:sqlite": {
+      "ok": true,
+      "selectOne": 1
+    },
+    "node:sqlite": {
+      "ok": true,
+      "selectOne": 1
+    }
   },
-  "sqlite": { "usable": true, "kind": "bun:sqlite" },
+  "sqlite": {
+    "usable": true,
+    "kind": "bun:sqlite"
+  },
   "identity": {
-    "lastRun": { "class": "unknown", "enrichment": "refused", "reason": "identity-incomplete" },
-    "remote": { "status": "descoped", "integration": "unverified", "claimed": false }
+    "lastRun": {
+      "class": "unknown",
+      "enrichment": "refused",
+      "reason": "identity-incomplete"
+    },
+    "remote": {
+      "status": "descoped",
+      "integration": "unverified",
+      "claimed": false
+    }
   },
-  "reload": { "reloadReranSetup": true },
-  "snapshots": { "count": 7, "instances": 7, "midTaskStatus": "running" },
+  "reload": {
+    "reloadReranSetup": true
+  },
+  "snapshots": {
+    "count": 7,
+    "instances": 7,
+    "midTaskStatus": "running"
+  },
   "coverage": {
     "listenTypes": 51,
     "referenceRealTypes": 51,
@@ -37,13 +63,62 @@
     "statusEventObserved": false,
     "locationShutdownObserved": true,
     "perInstance": [
-      { "instance": "15978cf5", "listenTypes": 41, "referenceTypes": 41, "paired": 384, "listenOnly": 0, "referenceOnly": 0 },
-      { "instance": "a6a025df", "listenTypes": 25, "referenceTypes": 26, "paired": 236, "listenOnly": 0, "referenceOnly": 1 },
-      { "instance": "c4cb14f7", "listenTypes": 10, "referenceTypes": 11, "paired": 10, "listenOnly": 0, "referenceOnly": 1 },
-      { "instance": "0d1c6d6e", "listenTypes": 10, "referenceTypes": 11, "paired": 10, "listenOnly": 0, "referenceOnly": 1 },
-      { "instance": "db3dfe4d", "listenTypes": 17, "referenceTypes": 18, "paired": 17, "listenOnly": 18, "referenceOnly": 1 },
-      { "instance": "d2c1f53b", "listenTypes": 17, "referenceTypes": 18, "paired": 17, "listenOnly": 18, "referenceOnly": 1 },
-      { "instance": "fe4045ee", "listenTypes": 16, "referenceTypes": 17, "paired": 17, "listenOnly": 0, "referenceOnly": 1 }
+      {
+        "instance": "15978cf5",
+        "listenTypes": 41,
+        "referenceTypes": 41,
+        "paired": 384,
+        "listenOnly": 0,
+        "referenceOnly": 0
+      },
+      {
+        "instance": "a6a025df",
+        "listenTypes": 25,
+        "referenceTypes": 26,
+        "paired": 236,
+        "listenOnly": 0,
+        "referenceOnly": 1
+      },
+      {
+        "instance": "c4cb14f7",
+        "listenTypes": 10,
+        "referenceTypes": 11,
+        "paired": 10,
+        "listenOnly": 0,
+        "referenceOnly": 1
+      },
+      {
+        "instance": "0d1c6d6e",
+        "listenTypes": 10,
+        "referenceTypes": 11,
+        "paired": 10,
+        "listenOnly": 0,
+        "referenceOnly": 1
+      },
+      {
+        "instance": "db3dfe4d",
+        "listenTypes": 17,
+        "referenceTypes": 18,
+        "paired": 17,
+        "listenOnly": 18,
+        "referenceOnly": 1
+      },
+      {
+        "instance": "d2c1f53b",
+        "listenTypes": 17,
+        "referenceTypes": 18,
+        "paired": 17,
+        "listenOnly": 18,
+        "referenceOnly": 1
+      },
+      {
+        "instance": "fe4045ee",
+        "listenTypes": 16,
+        "referenceTypes": 17,
+        "paired": 17,
+        "listenOnly": 0,
+        "referenceOnly": 1
+      }
     ]
   },
   "scenarios": {
@@ -62,7 +137,18 @@
     "explicit disconnect": true,
     "reload re-ran setup": true
   },
-  "canaries": { "categories": ["prompt", "tool", "permission", "error", "form"], "tokens": 5, "filesScanned": 24, "leaked": 0 },
+  "canaries": {
+    "categories": [
+      "prompt",
+      "tool",
+      "permission",
+      "error",
+      "form"
+    ],
+    "tokens": 5,
+    "filesScanned": 24,
+    "leaked": 0
+  },
   "fences": {
     "highest": 6,
     "ownerInstances": 5,
@@ -78,23 +164,39 @@
     "clientId": "1572459187873783838",
     "payload": {
       "details": "M0 transmission test",
-      "state": "M0 · events observed",
+      "state": "M0 \u00b7 events observed",
       "assets": {
         "large_image": "state-working",
-        "large_text": "OpenCode — Working",
+        "large_text": "OpenCode \u2014 Working",
         "small_image": "badge-model",
         "small_text": "Model: opencode/deepseek-v4.1-flash-free"
       }
     },
     "anchors": [
-      { "session": "f3a45eaa", "seconds": 1794983809, "writes": 5 },
-      { "session": "edc969ab", "seconds": 1794983899, "writes": 2, "identity": "unknown" }
+      {
+        "session": "f3a45eaa",
+        "seconds": 1794983809,
+        "writes": 5
+      },
+      {
+        "session": "edc969ab",
+        "seconds": 1794983899,
+        "writes": 2,
+        "identity": "unknown"
+      }
     ],
     "minimumRepublishGapSeconds": 9
   },
   "session": {
-    "selectedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free" },
-    "executedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free", "variant": "default" },
+    "selectedModel": {
+      "providerID": "opencode",
+      "id": "deepseek-v4.1-flash-free"
+    },
+    "executedModel": {
+      "providerID": "opencode",
+      "id": "deepseek-v4.1-flash-free",
+      "variant": "default"
+    },
     "agent": "build",
     "reportedCost": 0,
     "sessionCost": 0,
@@ -104,8 +206,15 @@
     "commitRule": "on non-ERROR acknowledgment only",
     "anchorScope": "server-qualified session in the coordination DB"
   },
-  "evidenceValidator": { "result": "PASS", "failures": 0, "negativeTests": 45 },
-  "tests": { "total": 77, "failed": 0 },
+  "evidenceValidator": {
+    "result": "PASS",
+    "failures": 0,
+    "negativeTests": 48
+  },
+  "tests": {
+    "total": 80,
+    "failed": 0
+  },
   "tarball": {
     "filename": "opencode-presence-discord-0.0.1.tgz",
     "sha256": "556d5951f163fd46202df8c40ff959f1af13cc6588824022d89ee36ae9dfb73b"

@@ -100,12 +100,13 @@ const bundleSha256 = sha256(bundlePath)
 
 const packGuard = record("pack-guard", [bun, "run", "scripts/pack-guard.ts"])
 const pack = record("pack", ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", packDir])
-const packInfo = (JSON.parse(pack.stdout.trim()) as Array<Record<string, unknown>>)[0]
+const packJson = JSON.parse(pack.stdout.trim()) as unknown
+const packInfo = (Array.isArray(packJson) ? packJson[0] : Object.values(packJson as Record<string, unknown>)[0]) as Record<string, unknown> | undefined
 if (!packInfo || typeof packInfo.filename !== "string") throw new Error("npm pack did not report a filename")
 const tarball = join(packDir, packInfo.filename)
 const artifactBytes = statSync(tarball).size
 const artifactSha256 = sha256(tarball)
-const entries = Array.isArray(packInfo.files) ? packInfo.files.length : -1
+const entries = typeof packInfo.entryCount === "number" ? packInfo.entryCount : Array.isArray(packInfo.files) ? packInfo.files.length : -1
 if (entries < 1) throw new Error("npm pack did not report package entries")
 
 const install = record("install", ["npm", "install", "--prefix", installed, "--ignore-scripts", "--no-audit", "--no-fund", tarball, "solid-js@1.9.13"])

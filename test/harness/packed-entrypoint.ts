@@ -264,7 +264,7 @@ try {
     await delay(100)
     assert.equal(starts(fake).length, 1, "entire sequence must wait for ACK")
     await Promise.all([first, second, third])
-    assert.equal(acks(h).length, 3)
+    await until(() => acks(h).length === 3)
     frozen(fake)
     await h.stop()
     const reload = await host("concurrent", fake)
@@ -457,8 +457,10 @@ try {
     process.kill(a.proc.pid, "SIGCONT")
     await delay(2500)
     const count = starts(fake).length
+    const connectionsBeforeRefusal = fake.connections
     await a.call("publish")
     assert.equal(starts(fake).length, count)
+    assert.equal(fake.connections, connectionsBeforeRefusal, "a refused non-owner publication must not open a connection")
     await a.stop()
     // b's ACK/reconciliation has completed too: kill recovery is tested at
     // this outside-transaction point, not inside the synchronous enqueue.

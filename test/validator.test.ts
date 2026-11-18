@@ -204,6 +204,22 @@ describe("M0 evidence validator", () => {
         target.at = new Date(1_750_000_000_000 + 16_500).toISOString()
       }),
     )
+    expectFail("clear before acquisition", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.attempt === "disconnect-command").at = new Date(1_750_000_000_000 - 500).toISOString()
+      }),
+    )
+    expectFail("clear after release", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.attempt === "disconnect-command").at = new Date(1_750_000_000_000 + 16_500).toISOString()
+      }),
+    )
+    expectFail("publication after revocation", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        const record = records.find((entry) => entry.attempt === "command-publish" && entry.rpcOk && entry.instanceId === "22222222-2222-4222-8222-222222222222")
+        record.at = new Date(1_750_000_000_000 + 10_500).toISOString()
+      }),
+    )
     expectFail("stale or mismatched fence", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
         records.find((record) => record.attempt === "command-publish" && record.rpcOk).fence = 2

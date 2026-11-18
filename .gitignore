@@ -2,7 +2,18 @@ node_modules/
 dist/
 *.log
 !docs/evidence/*.log
+!docs/evidence/**/*.log
 .DS_Store
 .env
 *.tgz
 .opencode/
+
+# Retained verification artifacts (Condition 1): the packed tarball, its bundle,
+# the extracted package and the checksums must stay in the repository.
+!artifacts/
+!artifacts/**
+!artifacts/*.tgz
+!artifacts/dist/
+!artifacts/dist/**
+!artifacts/extracted/
+!artifacts/extracted/**

@@ -220,8 +220,8 @@ const evidence = {
     build: "bun run build",
   },
   lab: {
-    path: lab,
-    availability: "ephemeral lab used to run the commands; not a durable evidence pointer",
+    ephemeral: true,
+    availability: "ephemeral lab used to run the commands; not retained and not an evidence pointer",
     evidenceDir: `docs/evidence/${runDirName}/`,
     logsMirroredTo: `docs/evidence/${runDirName}/`,
   },
@@ -353,7 +353,7 @@ const evidence = {
     crashRecovery: "pending intent preserves anchor; an ACK lost before persistence is not claimed durably committed",
   },
   cleanup: {
-    generatedLab: lab,
+    generatedLab: "ephemeral; not retained",
     evidenceRun: `docs/evidence/${runDirName}/`,
     artifactRetained: `artifacts/${packInfo.filename}`,
     publishedToNpm: false,

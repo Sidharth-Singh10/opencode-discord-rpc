@@ -13,10 +13,10 @@
     "build": "bun run build"
   },
   "lab": {
-    "path": "/tmp/opencode/discord-rpc-actor6.n8KoYO",
-    "availability": "ephemeral lab used to run the commands; not a durable evidence pointer",
+    "availability": "ephemeral lab used to run the commands; not retained and not an evidence pointer",
     "evidenceDir": "docs/evidence/run-20261118T234844Z/",
-    "logsMirroredTo": "docs/evidence/run-20261118T234844Z/"
+    "logsMirroredTo": "docs/evidence/run-20261118T234844Z/",
+    "ephemeral": true
   },
   "disclosures": {
     "harnessModelIdentity": "opencode/deepseek-v4.1-flash-free is a harness test identity, not an executed model. Live evidence is real host, scripted inference.",
@@ -227,7 +227,7 @@
     "crashRecovery": "pending intent preserves anchor; an ACK lost before persistence is not claimed durably committed"
   },
   "cleanup": {
-    "generatedLab": "/tmp/opencode/discord-rpc-actor6.n8KoYO",
+    "generatedLab": "ephemeral; not retained",
     "evidenceRun": "docs/evidence/run-20261118T234844Z/",
     "artifactRetained": "artifacts/opencode-presence-discord-0.0.1.tgz",
     "publishedToNpm": false,

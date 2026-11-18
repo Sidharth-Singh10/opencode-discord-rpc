@@ -97,6 +97,88 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   writeFileSync(join(output!, "results.json"), JSON.stringify({ kind: "synthetic-packed-entrypoint", results }, null, 2) + "\n")
 }
 try {
+  await test("newest-assistant-identity-never-substitutes-supported-history", async () => {
+    const fake = await endpoint("newest-assistant")
+    const older = { type: "assistant", model: { id: "deepseek-v4.1-flash-free", providerID: "opencode" }, agent: "build" }
+    const credential = { credentials: { token: "NEWEST_CREDENTIAL_CONTAINER", path: "/home/NEWEST_PRIVATE/file" } }
+    const cases = [
+      { name: "container-model", model: { ...older.model, id: credential }, agent: "plan" },
+      { name: "unsupported-model", model: { ...older.model, id: "unsupported-newest-model" }, agent: "plan" },
+      { name: "container-provider", model: { ...older.model, providerID: credential }, agent: "plan" },
+      { name: "unsupported-provider", model: { ...older.model, providerID: "unsupported-newest-provider" }, agent: "plan" },
+      { name: "container-variant", model: { ...older.model, variant: credential }, agent: "plan" },
+      { name: "unsupported-variant", model: { ...older.model, variant: "unsupported-newest-variant" }, agent: "plan" },
+      { name: "container-agent", model: older.model, agent: credential },
+      { name: "unsupported-agent", model: older.model, agent: "unsupported-newest-agent" },
+    ]
+    const assertPrivate = (h: Host): void => {
+      for (const file of evidenceFiles(h.evidence)) {
+        const content = readFileSync(file, "utf8")
+        for (const token of ["NEWEST_CREDENTIAL_CONTAINER", "/home/NEWEST_PRIVATE/file", "unsupported-newest-"]) {
+          assert(!content.includes(token), `newest-assistant identity leaked in ${file}`)
+        }
+      }
+    }
+    for (const anchored of [false, true]) for (const identity of cases) {
+      const h = await host(`newest-${identity.name}-${anchored ? "anchored" : "unanchored"}`, fake)
+      if (anchored) {
+        await h.call("publish")
+        await until(() => acks(h).length === 1)
+      }
+      await h.call("set", { messages: [
+          { type: "user", time: { created: 1_750_000_000_123 } },
+          older,
+          { type: "assistant", model: identity.model, agent: identity.agent },
+          { type: "user", time: { created: 1_750_000_010_123 } },
+        ], agent: "build" })
+      await h.call("snapshot")
+      const framesBefore = fake.activityFrames().length
+      assert.equal((await h.call("publish")).ok, true)
+      await until(() => records(h.evidence).some((r) => r.code === "executed-model-unknown"))
+      const publication = records(h.evidence).filter((r) => r.attempt === "command-publish").at(-1)
+      assert.equal(publication.code, "executed-model-unknown")
+      assert.equal(publication.phase, "pre-enqueue")
+      assert.equal(publication.nonce, undefined)
+      assert.equal(acks(h).length, anchored ? 1 : 0)
+      assert.equal(fake.activityFrames().length, framesBefore, "unsupported newest identity must not enqueue")
+      const snapshot = JSON.parse(readFileSync(join(h.evidence, "snapshot.json"), "utf8"))
+      assert.equal(snapshot.inspection.agent, ["plan"].includes(identity.agent as string) ? "plan" : null)
+      if (identity.name.includes("model") || identity.name.includes("provider") || identity.name.includes("variant")) assert.equal(snapshot.inspection.executedModel, null)
+      const db = h.db()
+      assert.equal((db.query("SELECT count(*) AS n FROM anchor").get() as any).n, anchored ? 1 : 0)
+      if (anchored) assert.equal((db.query("SELECT seconds FROM anchor").get() as any).seconds, 1_750_000_000)
+      assert.equal((db.query("SELECT count(*) AS n FROM anchor_pending").get() as any).n, 0)
+      db.close()
+      if (anchored) await h.call("disconnect")
+      await h.stop()
+      assertPrivate(h)
+    }
+    const h = await host("newest-supported", fake, "local", { state: {
+      messages: [
+        { type: "user", time: { created: 1_750_000_000_123 } },
+        older,
+        { type: "assistant", model: { id: "deepseek-v4.1-flash", providerID: "opencode-go", credentials: credential }, agent: "plan", content: credential },
+      ],
+      agent: "build",
+    } })
+    await h.call("publish")
+    await until(() => acks(h).length === 1)
+    assert.deepEqual(acks(h)[0].modelProvenance.executed, { id: "deepseek-v4.1-flash", providerID: "opencode-go" })
+    assert.equal(acks(h)[0].modelProvenance.agent, "plan")
+    await h.call("set", { messages: [
+      older,
+      { type: "user", time: { created: 1_750_000_010_123 } },
+      { type: "assistant", model: { ...older.model, credentials: credential }, agent: "build", content: credential },
+    ] })
+    await h.call("publish")
+    await until(() => acks(h).length === 2)
+    assert.deepEqual(acks(h)[1].modelProvenance.executed, older.model)
+    assert.equal(acks(h)[1].modelProvenance.agent, "build")
+    assert.equal(acks(h)[1].activity.timestamps.start, acks(h)[0].activity.timestamps.start)
+    await h.call("disconnect")
+    await h.stop()
+    assertPrivate(h)
+  })
   await test("authorized-rejection-closure-and-reconnect", async () => {
     const fake = await endpoint("rejection", { rejectOnce: true })
     const h = await host("rejection", fake)
@@ -288,7 +370,7 @@ try {
       }
     }
   })
-  await test("pending-intent-SIGSTOP-takeover-revoked-refusal-kill-recovery", async () => {
+  await test("pending-intent-post-ACK-outside-transaction-SIGSTOP-takeover-revoked-refusal-kill-recovery", async () => {
     const fake = await endpoint("takeover", { responseDelayMs: 300 })
     const a = await host("takeover", fake)
     const first = a.call("publish")
@@ -297,6 +379,9 @@ try {
     db.exec("CREATE TRIGGER fail_anchor BEFORE INSERT ON anchor BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
     await first
     const b = await host("takeover", fake)
+    // Publication, ACK and its failed persistence attempt have returned.
+    // SIGSTOP is outside any ownership write transaction; this does NOT
+    // demonstrate bounded takeover while a suspended writer holds SQLite.
     process.kill(a.proc.pid, "SIGSTOP")
     await until(() => (db.query("SELECT pid FROM owner").get() as any)?.pid === b.proc.pid, 16_000)
     db.exec("DROP TRIGGER fail_anchor")
@@ -309,6 +394,8 @@ try {
     await a.call("publish")
     assert.equal(starts(fake).length, count)
     await a.stop()
+    // b's ACK/reconciliation has completed too: kill recovery is tested at
+    // this outside-transaction point, not inside the synchronous enqueue.
     process.kill(b.proc.pid, "SIGKILL")
     await b.proc.exited
     children.delete(b)

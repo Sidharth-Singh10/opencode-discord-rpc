@@ -400,7 +400,7 @@ export default Plugin.define({
           const inspection = await inspectSession(context, observed.sessionID, salt)
           if (disposed || disposing) return
           if (!inspection.found) return refuse("session-unreadable")
-          if (!inspection.executedModel) return refuse("executed-model-unknown")
+          if (!inspection.executedModel || !inspection.agent) return refuse("executed-model-unknown")
 
           const state = publisher.readAnchorState(sessionKey)
           const reserved = state.acknowledgedUnpersisted ?? state.committed ?? state.pending

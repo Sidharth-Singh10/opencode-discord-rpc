@@ -6,7 +6,7 @@ import { join } from "node:path"
 import type { Context } from "@opencode/plugin/tui/plugin"
 
 import { captureEvent, errorRecord, validateCaptureRecord } from "../src/m0/capture.js"
-import { classifyLocality, loadPseudonymSalt, loadSqliteBackend, pseudonym, resolveSessionTimestamp, toUnixSeconds } from "../src/m0/probe.js"
+import { classifyLocality, loadPseudonymSalt, loadSqliteBackend, pseudonym, toUnixSeconds } from "../src/m0/probe.js"
 import { Publisher } from "../src/m0/publisher.js"
 import { buildActivity, validateActivity } from "../src/discord/presence.js"
 import { DiscordIpc, FrameDecoder, OPCODE, encodeFrame } from "../src/discord/ipc.js"
@@ -91,17 +91,6 @@ describe("timestamp lifecycle helpers", () => {
     expect(toUnixSeconds(Number.NaN)).toEqual({ code: "timestamp-invalid" })
     expect(toUnixSeconds(-1)).toEqual({ code: "timestamp-invalid" })
     expect(toUnixSeconds(Date.now() + 3_600_000)).toEqual({ code: "timestamp-future" })
-  })
-
-  test("an existing anchor survives later user messages and reports committed", () => {
-    const first = resolveSessionTimestamp(null, 1_750_000_000_123)
-    expect(first).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123, committed: false })
-    const anchor = { seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123 }
-    expect(resolveSessionTimestamp(anchor, 1_760_000_000_999)).toEqual({
-      seconds: 1_750_000_000,
-      sourceCreatedMs: 1_750_000_000_123,
-      committed: true,
-    })
   })
 })
 
@@ -484,40 +473,6 @@ describe("publisher owner and fence", () => {
     expect(acquired.status).toBe("contended")
     expect(second.readAnchor(key)?.seconds).toBe(1_750_000_000)
     expect(second.markAcknowledged("not-a-key", 1_750_000_000, 1_750_000_000_123).ok).toBe(false)
-  })
-
-  test("failed attempt does not commit; a later success freezes the latest message and survives reload/takeover", async () => {
-    const { backend } = await loadSqliteBackend()
-    if (!backend) return
-    const dir = tempDir("pub-anchor-lifecycle")
-    const key = "b".repeat(64)
-    const first = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
-    closers.push(() => first.stop())
-    expect(first.start().status).toBe("acquired")
-
-    // Attempt 1 fails before acknowledgement: nothing is committed.
-    const attempt1 = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_000_100)
-    expect(attempt1).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_100, committed: false })
-    expect(first.readAnchor(key)).toBeNull()
-
-    // A later user message moves the candidate until the first success commits.
-    const attempt2 = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_010_900)
-    expect(attempt2).toEqual({ seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_900, committed: false })
-    expect(first.markAcknowledged(key, 1_750_000_010, 1_750_000_010_900).ok).toBe(true)
-
-    // Later messages do not move a committed anchor.
-    const later = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_999_000)
-    expect(later).toEqual({ seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_900, committed: true })
-
-    // A reload/new generation and a taking-over instance read the same anchor.
-    const reloaded = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
-    closers.push(() => reloaded.stop())
-    expect(reloaded.start().status).toBe("contended")
-    expect(resolveSessionTimestamp(reloaded.readAnchor(key), 1_760_000_000_000)).toEqual({
-      seconds: 1_750_000_010,
-      sourceCreatedMs: 1_750_000_010_900,
-      committed: true,
-    })
   })
 
   test("reserves anchor intent in the transaction and never writes on conflict", async () => {

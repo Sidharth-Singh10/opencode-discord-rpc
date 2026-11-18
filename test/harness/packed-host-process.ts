@@ -45,7 +45,7 @@ const context: any = {
       status: () => state.status,
       cost: () => state.cost ?? 0,
       message: {
-        list: () => state.empty ? [] : [
+        list: () => state.empty ? [] : state.messages ?? [
           { type: "user", time: { created: state.created } },
           { type: "assistant", model: state.executed ?? { id: "deepseek-v4.1-flash-free", providerID: "opencode" }, agent: state.messageAgent ?? "build" },
         ],

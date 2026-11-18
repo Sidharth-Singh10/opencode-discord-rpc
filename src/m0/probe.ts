@@ -374,21 +374,6 @@ export function toUnixSeconds(createdMs: number | null): { seconds: number } | {
   return { seconds }
 }
 
-export interface TimestampAnchor {
-  seconds: number
-  sourceCreatedMs: number
-}
-
-export function resolveSessionTimestamp(
-  anchor: TimestampAnchor | null,
-  latestUserMessageAtMs: number | null,
-): { seconds: number; sourceCreatedMs: number; committed: boolean } | { code: TimestampErrorCode } {
-  if (anchor) return { seconds: anchor.seconds, sourceCreatedMs: anchor.sourceCreatedMs, committed: true }
-  const converted = toUnixSeconds(latestUserMessageAtMs)
-  if ("code" in converted) return converted
-  return { seconds: converted.seconds, sourceCreatedMs: latestUserMessageAtMs as number, committed: false }
-}
-
 export async function inspectSession(context: Context, sessionID: string, salt: string): Promise<SessionInspection> {
   const errors: string[] = []
   const inspection: SessionInspection = {
@@ -446,8 +431,6 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
       cacheWrite: info.tokens.cache.write,
     })
   }
-  inspection.agent = info.agent ? safeIdentifier(info.agent) : null
-
   try {
     // The prompt's selection can drift from the model that actually ran.
     const current = context.ui.model.current()
@@ -472,17 +455,13 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
-    if (!message) continue
-    if (message.type === "assistant") {
-      if (!inspection.executedModel) {
-        inspection.executedModel = sanitizeModel({
-          id: message.model.id,
-          providerID: message.model.providerID,
-          ...(message.model.variant ? { variant: message.model.variant } : {}),
-        })
-      }
-      if (!inspection.agent) inspection.agent = message.agent ? safeIdentifier(message.agent) : null
-    }
+    if (!message || message.type !== "assistant") continue
+    // Choose the newest execution first, even when its identity is unusable.
+    // Neither older executions nor the session's current selection can stand
+    // in for the model/provider/agent that actually ran.
+    inspection.executedModel = sanitizeModel(message.model)
+    inspection.agent = safeIdentifier(message.agent)
+    break
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {

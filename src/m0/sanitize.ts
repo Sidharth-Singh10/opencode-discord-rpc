@@ -1,15 +1,14 @@
 /**
  * Evidence projection. Every value that reaches an evidence sink passes one of
  * these projectors first. They are runtime allowlists, not TypeScript-shaped
- * assertions: unknown keys are never copied, strings must match a fixed
- * identifier/version grammar and enums are checked at runtime.
+ * assertions: unknown keys are never copied, metadata uses a finite vocabulary,
+ * numeric versions are checked and enums are checked at runtime.
  */
 import { validateActivity } from "../discord/presence.js"
 
 export const HASH = /^[0-9a-f]{16}$/
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-export const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 export const VERSION = /^[0-9]+(\.[0-9]+){0,3}$/
 
 // M0 is a transmission spike, not a general metadata exporter. A grammar
@@ -74,7 +73,10 @@ export function sanitizeModel(value: unknown): SafeModel | null {
   const id = safeIdentifier(model.id)
   const providerID = safeIdentifier(model.providerID)
   if (!id || !providerID) return null
+  // An identity that ran with an unreviewed variant is not the identity we can
+  // name. Dropping the variant would silently publish a different identity.
   const variant = model.variant === undefined ? undefined : safeIdentifier(model.variant)
+  if (!variant && model.variant !== undefined) return null
   return { id, providerID, ...(variant ? { variant } : {}) }
 }
 

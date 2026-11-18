@@ -10,20 +10,42 @@
     "arch": "x64"
   },
   "imports": {
-    "node:net": { "ok": true, "createConnection": true },
-    "bun:sqlite": { "ok": true, "selectOne": 1 },
-    "node:sqlite": { "ok": true, "selectOne": 1 }
+    "node:net": {
+      "ok": true,
+      "createConnection": true
+    },
+    "bun:sqlite": {
+      "ok": true,
+      "selectOne": 1
+    },
+    "node:sqlite": {
+      "ok": true,
+      "selectOne": 1
+    }
   },
-  "sqlite": { "usable": true, "kind": "bun:sqlite" },
-  "locality": { "class": "local", "enrichment": "allowed" },
+  "sqlite": {
+    "usable": true,
+    "kind": "bun:sqlite"
+  },
+  "locality": {
+    "class": "local",
+    "enrichment": "allowed"
+  },
   "remoteTest": {
     "status": "blocked",
     "classification": "unknown",
     "enrichment": "refused",
     "reason": "No genuine authorized remote endpoint exists in this environment."
   },
-  "reload": { "reloadReranSetup": true, "method": "/reload after editing cli.json live:true" },
-  "snapshots": { "count": 6, "instances": 6, "midTaskStatus": "running" },
+  "reload": {
+    "reloadReranSetup": true,
+    "method": "/reload after editing cli.json live:true"
+  },
+  "snapshots": {
+    "count": 6,
+    "instances": 6,
+    "midTaskStatus": "running"
+  },
   "capture": {
     "listenTypes": 51,
     "referenceTypes": 52,
@@ -33,7 +55,10 @@
     "idleEventObserved": false,
     "statusEventObserved": false,
     "locationShutdownObserved": 2,
-    "serverConnected": { "listen": 2, "reference": 6 }
+    "serverConnected": {
+      "listen": 2,
+      "reference": 6
+    }
   },
   "scenarios": {
     "startup mid-task snapshot": true,
@@ -50,23 +75,69 @@
     "explicit disconnect": true,
     "location shutdown": true
   },
-  "canaries": { "categories": ["prompt", "tool", "permission", "error", "form"], "tokens": 5, "filesScanned": 21, "leaked": 0 },
+  "canaries": {
+    "categories": [
+      "prompt",
+      "tool",
+      "permission",
+      "error",
+      "form"
+    ],
+    "tokens": 5,
+    "filesScanned": 21,
+    "leaked": 0
+  },
   "fences": {
     "ownerChanges": 5,
     "highest": 5,
     "instances": 4,
     "events": [
-      { "fence": 1, "kind": "acquire" },
-      { "fence": 1, "kind": "release" },
-      { "fence": 2, "kind": "acquire" },
-      { "fence": 2, "kind": "release" },
-      { "fence": 3, "kind": "acquire" },
-      { "fence": 4, "kind": "takeover", "previousFence": 3 },
-      { "fence": 3, "kind": "revoke", "reason": "fence-changed" },
-      { "fence": 3, "kind": "release" },
-      { "fence": 4, "kind": "release" },
-      { "fence": 5, "kind": "acquire" },
-      { "fence": 5, "kind": "release" }
+      {
+        "fence": 1,
+        "kind": "acquire"
+      },
+      {
+        "fence": 1,
+        "kind": "release"
+      },
+      {
+        "fence": 2,
+        "kind": "acquire"
+      },
+      {
+        "fence": 2,
+        "kind": "release"
+      },
+      {
+        "fence": 3,
+        "kind": "acquire"
+      },
+      {
+        "fence": 4,
+        "kind": "takeover",
+        "previousFence": 3
+      },
+      {
+        "fence": 3,
+        "kind": "revoke",
+        "reason": "fence-changed"
+      },
+      {
+        "fence": 3,
+        "kind": "release"
+      },
+      {
+        "fence": 4,
+        "kind": "release"
+      },
+      {
+        "fence": 5,
+        "kind": "acquire"
+      },
+      {
+        "fence": 5,
+        "kind": "release"
+      }
     ]
   },
   "publication": {
@@ -78,25 +149,57 @@
     "clientId": "1572459187873783838",
     "payload": {
       "details": "M0 transmission test",
-      "state": "M0 · events observed",
+      "state": "M0 \u00b7 events observed",
       "assets": {
         "large_image": "state-working",
-        "large_text": "OpenCode — Working",
+        "large_text": "OpenCode \u2014 Working",
         "small_image": "badge-model",
         "small_text": "Model: opencode/deepseek-v4.1-flash-free"
       }
     },
     "writes": [
-      { "fence": 3, "selector": "route", "rpcAcknowledged": true, "nonceMatched": true },
-      { "fence": 3, "selector": "route", "rpcAcknowledged": true, "nonceMatched": true },
-      { "fence": 4, "selector": "event", "rpcAcknowledged": true, "nonceMatched": true },
-      { "fence": 4, "selector": "event", "rpcAcknowledged": true, "nonceMatched": true },
-      { "fence": 5, "selector": "event", "rpcAcknowledged": true, "nonceMatched": true }
+      {
+        "fence": 3,
+        "selector": "route",
+        "rpcAcknowledged": true,
+        "nonceMatched": true
+      },
+      {
+        "fence": 3,
+        "selector": "route",
+        "rpcAcknowledged": true,
+        "nonceMatched": true
+      },
+      {
+        "fence": 4,
+        "selector": "event",
+        "rpcAcknowledged": true,
+        "nonceMatched": true
+      },
+      {
+        "fence": 4,
+        "selector": "event",
+        "rpcAcknowledged": true,
+        "nonceMatched": true
+      },
+      {
+        "fence": 5,
+        "selector": "event",
+        "rpcAcknowledged": true,
+        "nonceMatched": true
+      }
     ]
   },
   "session": {
-    "selectedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free" },
-    "executedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free", "variant": "default" },
+    "selectedModel": {
+      "providerID": "opencode",
+      "id": "deepseek-v4.1-flash-free"
+    },
+    "executedModel": {
+      "providerID": "opencode",
+      "id": "deepseek-v4.1-flash-free",
+      "variant": "default"
+    },
     "agent": "build",
     "reportedCost": 0,
     "sessionCost": 0,
@@ -104,9 +207,17 @@
     "timestampOriginalUnits": "milliseconds since Unix epoch",
     "timestampConversion": "floor(ms / 1000)"
   },
-  "evidenceValidator": { "result": "PASS", "failures": 0 },
+  "evidenceValidator": {
+    "result": "PASS",
+    "failures": 0
+  },
   "tarball": {
     "filename": "opencode-presence-discord-0.0.1.tgz",
     "sha256": "59550800524204f989dc3871bec16fb8b315c71eae095790aa0eb7364584d970"
-  }
+  },
+  "gate": "BLOCKED",
+  "gateReasons": [
+    "remote endpoint not available; identity unknown and enrichment refused",
+    "visual Discord card check pending with the user"
+  ]
 }

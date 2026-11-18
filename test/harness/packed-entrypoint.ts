@@ -1,0 +1,332 @@
+/**
+ * bun test/harness/packed-entrypoint.ts <npm-install-prefix> <fresh-output-dir>
+ * Synthetic Context + fake IPC, real installed package, SQLite and processes.
+ * This is NOT a live OpenCode/Discord run.
+ */
+import assert from "node:assert/strict"
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import { join, resolve } from "node:path"
+import { Database } from "bun:sqlite"
+import { FakeDiscord } from "../fake-discord.js"
+
+const [installation, output] = process.argv.slice(2).map((value) => resolve(value))
+if (!installation || !output) throw new Error("installation and fresh output required")
+mkdirSync(output, { recursive: true })
+const children = new Set<Host>()
+const endpoints = new Set<FakeDiscord>()
+const results: Record<string, unknown> = {}
+const delay = (ms: number) => Bun.sleep(ms)
+async function until(fn: () => boolean, timeout = 5000): Promise<void> {
+  const end = Date.now() + timeout
+  while (!fn()) {
+    if (Date.now() >= end) throw new Error("condition timed out")
+    await delay(20)
+  }
+}
+function records(dir: string, file = "publication.jsonl"): any[] {
+  try { return readFileSync(join(dir, file), "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) }
+  catch { return [] }
+}
+function evidenceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? evidenceFiles(join(dir, entry.name)) : /\.(json|jsonl)$/.test(entry.name) ? [join(dir, entry.name)] : [])
+}
+class Host {
+  readonly proc: ReturnType<typeof Bun.spawn>
+  private seq = 0
+  private replies = new Map<number, (value: any) => void>()
+  readonly ready: Promise<void>
+  constructor(readonly root: string, socket: string, identity = "local", metadata?: unknown) {
+    mkdirSync(root, { recursive: true })
+    this.proc = Bun.spawn([process.execPath, join(import.meta.dir, "packed-host-process.ts"), installation!, join(root, "runtime"), join(root, "evidence"), identity], {
+      env: { ...process.env, DISCORD_IPC_PATH: socket, PACKED_HOST_METADATA: JSON.stringify(metadata ?? {}) },
+      stdin: "pipe", stdout: "pipe", stderr: Bun.file(join(root, `stderr-${Date.now()}.log`)),
+    })
+    children.add(this)
+    this.ready = new Promise((resolveReady, rejectReady) => {
+      void (async () => {
+        let buffer = ""
+        for await (const chunk of this.proc.stdout as ReadableStream<Uint8Array>) {
+          buffer += new TextDecoder().decode(chunk)
+          let end
+          while ((end = buffer.indexOf("\n")) >= 0) {
+            const message = JSON.parse(buffer.slice(0, end))
+            buffer = buffer.slice(end + 1)
+            if (message.ready) resolveReady()
+            else { this.replies.get(message.id)?.(message); this.replies.delete(message.id) }
+          }
+        }
+        rejectReady(new Error("host exited before ready"))
+      })().catch(rejectReady)
+    })
+  }
+  get evidence(): string { return join(this.root, "evidence") }
+  call(action: string, value?: unknown, app?: unknown): Promise<any> {
+    const id = ++this.seq
+    const reply = new Promise((resolveReply) => this.replies.set(id, resolveReply))
+    ;(this.proc.stdin as any).write(JSON.stringify({ id, action, value, app }) + "\n")
+    return Promise.race([reply, delay(15_000).then(() => { throw new Error(`host command timeout: ${action}`) })])
+  }
+  db(): Database { return new Database(join(this.root, "runtime", "publisher.sqlite")) }
+  async stop(): Promise<void> {
+    if (this.proc.exitCode !== null) return
+    await this.call("dispose")
+    ;(this.proc.stdin as any).end()
+    await this.proc.exited
+    children.delete(this)
+  }
+}
+async function endpoint(name: string, options: Record<string, unknown> = {}): Promise<FakeDiscord> {
+  const fake = new FakeDiscord({ path: join(output!, `${name}.sock`), ...options })
+  endpoints.add(fake)
+  await fake.start()
+  return fake
+}
+async function host(name: string, fake: FakeDiscord, identity = "local", metadata?: unknown): Promise<Host> {
+  const h = new Host(join(output!, name), fake.path, identity, metadata)
+  await h.ready
+  return h
+}
+function acks(h: Host): any[] { return records(h.evidence).filter((r) => r.attempt === "command-publish" && r.rpcOk === true) }
+function starts(fake: FakeDiscord): number[] { return fake.activityFrames().map((frame: any) => frame.payload.args.activity?.timestamps.start).filter((v) => v !== undefined) }
+function frozen(fake: FakeDiscord, seconds = 1_750_000_000): void { assert.deepEqual([...new Set(starts(fake))], [seconds]) }
+async function test(name: string, fn: () => Promise<void>): Promise<void> {
+  await fn()
+  results[name] = "PASS"
+  console.log(`PASS ${name}`)
+  writeFileSync(join(output!, "results.json"), JSON.stringify({ kind: "synthetic-packed-entrypoint", results }, null, 2) + "\n")
+}
+try {
+  await test("authorized-rejection-closure-and-reconnect", async () => {
+    const fake = await endpoint("rejection", { rejectOnce: true })
+    const h = await host("rejection", fake)
+    await h.call("publish")
+    await until(() => records(h.evidence).some((r) => r.code === "rpc-rejected" && r.phase === "post-enqueue" && r.nonce && r.cmd === "SET_ACTIVITY"))
+    assert.equal(acks(h).length, 0)
+    await h.call("set", { created: 1_750_000_010_123 })
+    await h.call("publish")
+    frozen(fake)
+    await h.call("disconnect")
+    await h.call("publish")
+    assert.equal(fake.connections, 2)
+    await h.call("disconnect")
+    await h.stop()
+  })
+  await test("concurrent-changing-message-delayed-ACK-reload", async () => {
+    const fake = await endpoint("concurrent", { responseDelayMs: 300 })
+    const h = await host("concurrent", fake)
+    const first = h.call("publish")
+    await until(() => starts(fake).length === 1)
+    await h.call("set", { created: 1_750_000_010_123 })
+    const second = h.call("publish"), third = h.call("publish")
+    await delay(100)
+    assert.equal(starts(fake).length, 1, "entire sequence must wait for ACK")
+    await Promise.all([first, second, third])
+    assert.equal(acks(h).length, 3)
+    frozen(fake)
+    await h.stop()
+    const reload = await host("concurrent", fake)
+    await reload.call("set", { created: 1_750_000_020_123 })
+    await reload.call("publish")
+    frozen(fake)
+    await reload.call("disconnect")
+    await reload.stop()
+  })
+  await test("ACK-DB-lock-retry-and-no-newer-anchor", async () => {
+    const fake = await endpoint("ack-lock", { responseDelayMs: 300 })
+    const h = await host("ack-lock", fake)
+    const first = h.call("publish")
+    await until(() => starts(fake).length === 1)
+    const db = h.db()
+    db.exec("BEGIN IMMEDIATE")
+    await first
+    await until(() => acks(h).length === 1)
+    assert.equal(acks(h)[0].code, "anchor-persist-failed")
+    assert.equal(acks(h)[0].timestampProvenance.anchorCommitted, false)
+    await h.call("set", { created: 1_750_000_010_123 })
+    await h.call("publish")
+    assert.equal(starts(fake).length, 1)
+    db.exec("COMMIT")
+    await until(() => !!db.query("SELECT seconds FROM anchor").get(), 6000)
+    assert.equal((db.query("SELECT seconds FROM anchor").get() as any).seconds, 1_750_000_000)
+    await h.call("publish")
+    frozen(fake)
+    db.close()
+    await h.call("disconnect")
+    await h.stop()
+  })
+  await test("persistence-failure-reload-pending-distinct-from-ACK", async () => {
+    const fake = await endpoint("persist-fail", { responseDelayMs: 300 })
+    const h = await host("persist-fail", fake)
+    const first = h.call("publish")
+    await until(() => starts(fake).length === 1)
+    const db = h.db()
+    db.exec("CREATE TRIGGER fail_anchor BEFORE INSERT ON anchor BEGIN SELECT RAISE(ABORT, 'synthetic persistence failure'); END")
+    await first
+    assert.equal((db.query("SELECT count(*) AS n FROM anchor").get() as any).n, 0)
+    assert.equal((db.query("SELECT count(*) AS n FROM anchor_pending").get() as any).n, 1)
+    await h.stop()
+    const reload = await host("persist-fail", fake)
+    await reload.call("set", { created: 1_750_000_010_123 })
+    await reload.call("publish")
+    frozen(fake)
+    await until(() => acks(reload).length === 2)
+    assert.equal(acks(reload)[1].timestampProvenance.committed, false, "pending intent must not be reported as ACK-committed")
+    db.exec("DROP TRIGGER fail_anchor")
+    await until(() => !!db.query("SELECT seconds FROM anchor").get(), 6000)
+    assert.equal((db.query("SELECT count(*) AS n FROM anchor_pending").get() as any).n, 0)
+    db.close()
+    await reload.call("disconnect")
+    await reload.stop()
+  })
+  await test("stored-anchor-conflict-blocks-before-and-after-reload", async () => {
+    const fake = await endpoint("conflict", { responseDelayMs: 300 })
+    const h = await host("conflict", fake)
+    const first = h.call("publish")
+    await until(() => starts(fake).length === 1)
+    const db = h.db()
+    const pending: any = db.query("SELECT * FROM anchor_pending").get()
+    db.query("INSERT INTO anchor VALUES (?, ?, ?, ?)").run(pending.session_key, 1_750_000_010, 1_750_000_010_123, Date.now())
+    await first
+    await h.call("set", { created: 1_750_000_010_123 })
+    await h.call("publish")
+    assert.equal(starts(fake).length, 1)
+    await until(() => records(h.evidence).some((r) => r.code === "anchor-conflict"))
+    await h.stop()
+    const reload = await host("conflict", fake)
+    await reload.call("publish")
+    assert.equal(starts(fake).length, 1)
+    db.close()
+    await reload.call("disconnect")
+    await reload.stop()
+  })
+  await test("dispose-pending-handshake-and-queued-commands", async () => {
+    const fake = await endpoint("dispose-handshake", { handshakeDelayMs: 600 })
+    const h = await host("dispose-handshake", fake)
+    const publishing = h.call("publish")
+    await until(() => fake.frames.length === 1)
+    const disposal = await h.call("dispose")
+    await publishing
+    await h.call("snapshot")
+    await h.call("disconnect")
+    await delay(800)
+    const stats = await h.call("stats")
+    assert.equal(stats.toasts, disposal.toasts)
+    assert.equal(fake.closedConnections, 1)
+    assert.equal(fake.activityFrames().length, 0)
+    assert(!records(h.evidence).some((r) => r.attempt === "ready"))
+    await h.stop()
+  })
+  await test("dispose-pending-ACK-and-snapshot-no-late-writes", async () => {
+    const fake = await endpoint("dispose-ack", { responseDelayMs: 700 })
+    const h = await host("dispose-ack", fake)
+    const publishing = h.call("publish")
+    await until(() => starts(fake).length === 1)
+    await h.call("set", { empty: true, syncDelay: 800 })
+    const snapshot = h.call("snapshot")
+    const disposal = await h.call("dispose")
+    const sizes = evidenceFiles(h.evidence).map((p) => [p, statSync(p).size])
+    await Promise.all([publishing, snapshot])
+    await delay(900)
+    assert.equal((await h.call("stats")).toasts, disposal.toasts)
+    assert.deepEqual(evidenceFiles(h.evidence).map((p) => [p, statSync(p).size]), sizes)
+    assert.equal(fake.closedConnections, 1)
+    assert.equal(fake.connections, 1)
+    assert.equal(acks(h).length, 0)
+    await h.stop()
+  })
+  await test("two-unknown-servers-same-session-refuse-with-no-anchor", async () => {
+    const fake = await endpoint("unknown")
+    for (const name of ["unknown-a", "unknown-b"]) {
+      const h = await host(name, fake, "unknown")
+      await h.call("publish")
+      await until(() => records(h.evidence).some((r) => r.code === "identity-unknown" && r.phase === "pre-enqueue" && !r.nonce))
+      const db = h.db()
+      assert.equal((db.query("SELECT count(*) AS n FROM anchor").get() as any).n, 0)
+      assert.equal((db.query("SELECT count(*) AS n FROM anchor_pending").get() as any).n, 0)
+      db.close()
+      await h.stop()
+    }
+    assert.equal(fake.connections, 0)
+  })
+  await test("metadata-every-source-refused-publications-and-capture-privacy", async () => {
+    const fake = await endpoint("privacy")
+    const h = await host("privacy", fake)
+    const secrets: unknown[] = [
+      "/home/CRITIC_SECRET/file", "https://user:password@private.example/v1",
+      "Error: CREDENTIAL_STACK\n at /private/file.ts:1:1", "sk-live-CRITIC-SECRET",
+      { credentials: { token: "CREDENTIAL_CONTAINER_VALUE", path: "/home/CRITIC_SECRET/file" } },
+    ]
+    for (const secret of secrets) {
+      await h.call("set", {
+        executed: { id: secret, providerID: secret, variant: secret },
+        selected: { modelID: secret, providerID: secret, variant: secret },
+        sessionModel: { id: secret, providerID: secret, variant: secret },
+        agent: secret, messageAgent: secret, cost: secret,
+        tokens: { input: secret, output: secret, reasoning: secret, cache: { read: secret, write: secret } },
+      })
+      await h.call("snapshot")
+      await h.call("publish")
+      for (const type of [secret, "session.model.selected", "session.agent.selected", "session.execution.failed"]) {
+        await h.call("event", { id: "evt_secret", type, data: { sessionID: "ses_packed", model: { id: secret, providerID: secret }, agentID: secret, error: secret, credentials: secret } })
+      }
+    }
+    await h.stop()
+    assert.equal(fake.activityFrames().length, 0)
+    for (const file of evidenceFiles(h.evidence)) {
+      const content = readFileSync(file, "utf8")
+      for (const secret of ["CRITIC", "CREDENTIAL", "user:password", "/private/file"]) assert(!content.includes(secret), `privacy leak in ${file}`)
+    }
+    assert(records(h.evidence).some((r) => r.code === "executed-model-unknown"))
+    for (const [index, secret] of secrets.entries()) {
+      const appHost = await host(`privacy-app-${index}`, fake, "local", { app: { version: secret, channel: secret } })
+      await appHost.call("snapshot")
+      await appHost.stop()
+      for (const file of evidenceFiles(appHost.evidence)) {
+        const content = readFileSync(file, "utf8")
+        for (const token of ["CRITIC", "CREDENTIAL", "user:password", "/private/file"]) assert(!content.includes(token), `app metadata leak in ${file}`)
+      }
+    }
+  })
+  await test("pending-intent-SIGSTOP-takeover-revoked-refusal-kill-recovery", async () => {
+    const fake = await endpoint("takeover", { responseDelayMs: 300 })
+    const a = await host("takeover", fake)
+    const first = a.call("publish")
+    await until(() => starts(fake).length === 1)
+    const db = a.db()
+    db.exec("CREATE TRIGGER fail_anchor BEFORE INSERT ON anchor BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+    await first
+    const b = await host("takeover", fake)
+    process.kill(a.proc.pid, "SIGSTOP")
+    await until(() => (db.query("SELECT pid FROM owner").get() as any)?.pid === b.proc.pid, 16_000)
+    db.exec("DROP TRIGGER fail_anchor")
+    await b.call("set", { created: 1_750_000_010_123 })
+    await b.call("publish")
+    frozen(fake)
+    process.kill(a.proc.pid, "SIGCONT")
+    await delay(2500)
+    const count = starts(fake).length
+    await a.call("publish")
+    assert.equal(starts(fake).length, count)
+    await a.stop()
+    process.kill(b.proc.pid, "SIGKILL")
+    await b.proc.exited
+    children.delete(b)
+    const c = await host("takeover", fake)
+    await until(() => (db.query("SELECT pid FROM owner").get() as any)?.pid === c.proc.pid, 16_000)
+    await c.call("set", { created: 1_750_000_020_123 })
+    await c.call("publish")
+    frozen(fake)
+    await c.call("disconnect")
+    await c.stop()
+    assert.equal((db.query("SELECT count(*) AS n FROM owner").get() as any).n, 0)
+    db.close()
+  })
+} finally {
+  for (const child of children) {
+    try { process.kill(child.proc.pid, "SIGCONT"); await child.stop() }
+    catch { child.proc.kill("SIGKILL") }
+  }
+  for (const fake of endpoints) await fake.stop()
+}
+console.log(`Packed entrypoint: ${Object.keys(results).length} scenarios PASS (synthetic host + fake Discord)`)

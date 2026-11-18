@@ -914,7 +914,7 @@ export function validateEvidence(dir: string): ValidationResult {
     const provenance = record.timestampProvenance
     const start = isObject(activity.timestamps) ? activity.timestamps.start : undefined
     if (provenance.seconds !== start) fail("published timestamp does not match provenance")
-    if (provenance.committed === true && provenance.anchorCommitted !== true) fail("a committed anchor was not marked committed on acknowledgment")
+    if (provenance.committed === true && provenance.anchorCommitted !== true && record.code !== "anchor-persist-failed") fail("an acknowledged anchor lacks persistence or an explicit persistence failure")
     if (provenance.committed === false && provenance.anchorCommitted === false && record.code !== "anchor-persist-failed") {
       fail("first acknowledged write neither committed nor recorded a persistence failure")
     }

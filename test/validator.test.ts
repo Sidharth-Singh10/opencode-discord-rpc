@@ -59,6 +59,17 @@ describe("M0 evidence validator", () => {
   test("accepts the complete positive fixture", () => {
     expectPass(fixture())
   })
+  test("accepts repeated ACKs with unresolved persistence followed by reconciliation", () => {
+    const dir = fixture()
+    editJsonl(dir, "publication.jsonl", (records) => {
+      const successful = records.filter((r) => r.attempt === "command-publish" && r.rpcOk === true)
+      for (const record of successful.slice(0, 2)) {
+        record.timestampProvenance.anchorCommitted = false
+        record.code = "anchor-persist-failed"
+      }
+    })
+    expectPass(dir)
+  })
   test("invalid evidence diagnostics do not repeat private values or keys", () => {
     const dir = fixture()
     const secret = "/home/CRITIC_SECRET/file"

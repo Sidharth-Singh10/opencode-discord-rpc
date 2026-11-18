@@ -67,7 +67,7 @@
       "canaries": { "categories": 5, "filesScanned": 24, "leaked": 0 },
       "slashReloadReranSetup": false,
       "fullTuiRestartReranSetup": true,
-      "locationShutdown": "Observed in both streams during slash reload; no additional event observed at later SIGTERM. Original failed extra-SIGTERM assertion is retained.",
+      "locationShutdown": "One shutdown event (eventIDHash 83118f274a29f379) captured by both streams during slash reload; no additional event observed at later SIGTERM. Original failed extra-SIGTERM assertion is retained.",
       "discordHandshakeTimeouts": 2,
       "laterReconnectAcknowledged": true
     },

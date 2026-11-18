@@ -142,14 +142,13 @@ if (!installedBundleMatchesTarball || !bundleMatchesTarball) {
 }
 
 const extractedFiles = readdirSync(extracted, { recursive: true })
-  .map((name) => String(name))
-  .filter((name) => statSync(join(extracted, name)).isFile())
+  .map((name) => `extracted/${String(name)}`)
+  .filter((name) => statSync(join(artifacts, name)).isFile())
   .sort()
 writeFileSync(join(artifacts, "SHA256SUMS"), [
   `${artifactSha256}  ${packInfo.filename}`,
   `${artifactBundleSha256}  dist/tui.js`,
-  `${extractedBundleSha256}  extracted/package/dist/tui.js`,
-  ...extractedFiles.map((name) => `${sha256(join(extracted, name))}  ${name}`),
+  ...[...new Set(extractedFiles)].map((name) => `${sha256(join(artifacts, name))}  ${name}`),
 ].join("\n") + "\n")
 writeFileSync(join(artifacts, "pack.json"), JSON.stringify({
   commit: head,

@@ -309,6 +309,31 @@ try {
     await h.call("disconnect")
     await h.stop()
   })
+  await test("disconnect-clear-refused-under-held-write-lock", async () => {
+    const fake = await endpoint("clear-refused")
+    const h = await host("clear-refused", fake)
+    await h.call("publish")
+    await until(() => acks(h).length === 1)
+    const framesBefore = fake.activityFrames().length
+    const db = h.db()
+    // Hold the writer lock from outside the plugin. The clear then reaches the
+    // production disconnect path with a ready socket and a live owner, but the
+    // synchronous owner/fence + enqueue transaction cannot start (busy). This is
+    // the only reachable route to clear-refused: a revoked publisher is refused
+    // as no-socket because onRevoked destroys the socket first. No bundle hook
+    // is involved; the lock is an ordinary external SQLite connection.
+    db.exec("BEGIN IMMEDIATE")
+    await h.call("disconnect")
+    await until(() => records(h.evidence).some((r) => r.code === "clear-refused"))
+    const refusal = records(h.evidence).find((r) => r.code === "clear-refused")
+    assert.equal(refusal.attempt, "disconnect-command")
+    assert.equal(refusal.phase, "pre-enqueue")
+    assert.equal(refusal.nonce, undefined)
+    assert.equal(fake.activityFrames().length, framesBefore, "a refused clear must not enqueue a frame")
+    db.exec("ROLLBACK")
+    db.close()
+    await h.stop()
+  })
   await test("persistence-failure-reload-pending-distinct-from-ACK", async () => {
     const fake = await endpoint("persist-fail", { responseDelayMs: 300 })
     const h = await host("persist-fail", fake)

@@ -50,6 +50,17 @@ describe("model, provider and agent vocabularies", () => {
     }
   })
 
+  test("lowercase secret-shaped agent tokens are admitted by the documented shape", () => {
+    // Agents are user-defined. The shape admits lowercase tokens that can look
+    // like a secret (underscores, digits, dots). Such a token can therefore be
+    // persisted in the 0600 evidence file, but it is never sent to Discord.
+    // This test records that accepted boundary rather than claiming the shape
+    // is a credential filter.
+    for (const agent of ["sk_live_abc123", "ghp_16c7e42f", "xoxb-1234-abcd"]) {
+      expect(safeAgent(agent)).toBe(agent)
+    }
+  })
+
   test("inspection and provenance keep a custom agent and a host variant", () => {
     const inspection = sanitizeInspection({
       observedAt: "2026-01-01T00:00:00.000Z",

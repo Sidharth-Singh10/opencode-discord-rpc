@@ -83,12 +83,20 @@ const maliciousModel = {
 }
 
 describe("evidence projection", () => {
-  test("model, provider, variant, agent and tooltip cannot carry identifier-shaped secrets", () => {
+  test("model, provider, variant and tooltip refuse identifier-shaped secrets; agent refuses non-shape text", () => {
     for (const secret of SECRETS) {
       assertClean(sanitizeInspection({ ...maliciousInspection, selectedModel: { id: secret, providerID: "opencode" }, executedModel: { id: "deepseek-v4.1-flash-free", providerID: secret }, agent: secret }), "metadata")
       const activity = buildActivity({ id: secret, providerID: "opencode" }, 1_750_000_000)
       expect(sanitizeActivity(activity)).toBeNull()
     }
+  })
+
+  test("a lowercase secret-shaped agent is shape-admitted into private evidence", () => {
+    // Documented boundary: the agent field is a user-defined host name, not a
+    // reviewed vocabulary. This token is persisted to 0600 evidence; it is
+    // never included in the Discord activity payload.
+    const safe = sanitizeInspection({ ...maliciousInspection, agent: "sk_live_abc123" })
+    expect((safe as Record<string, unknown>).agent).toBe("sk_live_abc123")
   })
 
   test("inspection drops credential URLs, private paths, stack text and unknown containers", () => {

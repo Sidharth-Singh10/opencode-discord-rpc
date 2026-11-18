@@ -398,7 +398,7 @@ export default Plugin.define({
           if (disposed || disposing) return
           if (!inspection.found) return refuse("session-unreadable")
           if (!inspection.executedModel) return refuse(inspection.executedModelCode ?? "executed-model-unknown")
-          if (!inspection.agent) return refuse("executed-agent-unknown")
+          if (!inspection.agent) return refuse(inspection.agentCode ?? "executed-agent-unknown")
 
           const state = publisher.readAnchorState(sessionKey)
           const reserved = state.acknowledgedUnpersisted ?? state.committed ?? state.pending

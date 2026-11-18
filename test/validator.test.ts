@@ -157,6 +157,70 @@ describe("M0 evidence validator", () => {
   })
 
   describe("publication provenance", () => {
+    test("accepts a documented custom agent identity in inspection and provenance", () => {
+      const dir = fixture()
+      editJson(dir, "snapshot-11111111-1111-4111-8111-111111111111.json", (snapshot) => (snapshot.inspection.agent = "team.reviewer"))
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.attempt === "command-publish" && record.rpcOk).modelProvenance.agent = "team.reviewer"
+      })
+      expectPass(dir)
+    })
+    test("accepts the post-connect refusal codes as pre-enqueue refusals", () => {
+      const dir = fixture()
+      editJsonl(dir, "publication.jsonl", (records) => {
+        for (const code of ["enqueue-busy", "enqueue-not-owner", "enqueue-revoked", "enqueue-no-store", "enqueue-error", "executed-agent-unknown", "executed-variant-unknown", "session-unreadable", "connect-failed", "not-owner", "anchor-persist-failed"]) {
+          records.push({
+            v: 1,
+            at: new Date(1_750_000_000_000 + 22_100).toISOString(),
+            instanceId: "22222222-2222-4222-8222-222222222222",
+            pid: 4002,
+            attempt: "command-publish",
+            phase: "pre-enqueue",
+            live: true,
+            code,
+          })
+        }
+      })
+      expectPass(dir)
+    })
+    expectFail("an agent outside the documented shape", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.find((record) => record.attempt === "command-publish" && record.rpcOk).modelProvenance.agent = "team/reviewer"
+      }),
+    )
+    expectFail("an inspection agent outside the documented shape", (dir) =>
+      editJson(dir, "snapshot-11111111-1111-4111-8111-111111111111.json", (snapshot) => (snapshot.inspection.agent = "team/reviewer")),
+    )
+    expectFail("unknown publication refusal code", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.push({
+          v: 1,
+          at: new Date(1_750_000_000_000 + 22_100).toISOString(),
+          instanceId: "22222222-2222-4222-8222-222222222222",
+          pid: 4002,
+          attempt: "command-publish",
+          phase: "pre-enqueue",
+          live: true,
+          code: "secret-shaped-refusal-code",
+        })
+      }),
+    )
+    expectFail("a post-connect refusal code cannot enqueue a nonce", (dir) =>
+      editJsonl(dir, "publication.jsonl", (records) => {
+        records.push({
+          v: 1,
+          at: new Date(1_750_000_000_000 + 22_100).toISOString(),
+          instanceId: "22222222-2222-4222-8222-222222222222",
+          pid: 4002,
+          attempt: "command-publish",
+          phase: "pre-enqueue",
+          live: true,
+          code: "enqueue-busy",
+          nonce: "77777777-7777-4777-8777-777777777777",
+          cmd: "SET_ACTIVITY",
+        })
+      }),
+    )
     expectFail("missing unknown-session refusal", (dir) =>
       editJsonl(dir, "publication.jsonl", (records) => {
         const kept = records.filter((record) => record.code !== "no-observed-session")

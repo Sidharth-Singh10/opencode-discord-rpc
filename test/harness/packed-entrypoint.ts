@@ -4,17 +4,29 @@
  * This is NOT a live OpenCode/Discord run.
  */
 import assert from "node:assert/strict"
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { Database } from "bun:sqlite"
 import { FakeDiscord } from "../fake-discord.js"
 
 const [installation, output] = process.argv.slice(2).map((value) => resolve(value))
 if (!installation || !output) throw new Error("installation and fresh output required")
+// A rerun must never reuse a previous scenario tree: stale runtime SQLite
+// stores and evidence would make prior acknowledgments look like this run's.
+if (existsSync(output) && readdirSync(output).length > 0) {
+  throw new Error(`refusing non-empty packed output directory: ${output}`)
+}
 mkdirSync(output, { recursive: true })
 const children = new Set<Host>()
 const endpoints = new Set<FakeDiscord>()
 const results: Record<string, unknown> = {}
+const resultsPath = join(output, "results.json")
+// Replace any previous green result immediately and leave a terminal marker on
+// failure, so a crashed rerun cannot be mistaken for a PASS.
+function marker(status: "RUNNING" | "FAIL" | "PASS", details: Record<string, unknown> = {}): void {
+  writeFileSync(resultsPath, JSON.stringify({ kind: "synthetic-packed-entrypoint", status, results, ...details }, null, 2) + "\n")
+}
+marker("RUNNING")
 const delay = (ms: number) => Bun.sleep(ms)
 async function until(fn: () => boolean, timeout = 5000): Promise<void> {
   const end = Date.now() + timeout
@@ -94,7 +106,7 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   await fn()
   results[name] = "PASS"
   console.log(`PASS ${name}`)
-  writeFileSync(join(output!, "results.json"), JSON.stringify({ kind: "synthetic-packed-entrypoint", results }, null, 2) + "\n")
+  marker("RUNNING")
 }
 try {
   await test("newest-assistant-identity-never-substitutes-supported-history", async () => {
@@ -190,7 +202,7 @@ try {
       { type: "assistant", model, agent },
     ] } })
 
-    for (const variant of ["max", "xhigh", "none", "minimal"]) {
+    for (const variant of ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
       const h = await host(`variant-${variant}`, fake, "local", messages({ ...base, variant }, "build"))
       await h.call("publish")
       await until(() => acks(h).length === 1)
@@ -477,6 +489,9 @@ try {
     assert.equal((db.query("SELECT count(*) AS n FROM owner").get() as any).n, 0)
     db.close()
   })
+} catch (error) {
+  marker("FAIL", { error: error instanceof Error ? error.message : String(error) })
+  throw error
 } finally {
   for (const child of children) {
     try { process.kill(child.proc.pid, "SIGCONT"); await child.stop() }
@@ -484,4 +499,5 @@ try {
   }
   for (const fake of endpoints) await fake.stop()
 }
+marker("PASS")
 console.log(`Packed entrypoint: ${Object.keys(results).length} scenarios PASS (synthetic host + fake Discord)`)

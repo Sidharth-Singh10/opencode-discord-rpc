@@ -1,0 +1,161 @@
+{
+  "opencode-presence-discord": {
+    "id": "opencode-presence-discord@0.0.1",
+    "name": "opencode-presence-discord",
+    "version": "0.0.1",
+    "size": 180225,
+    "unpackedSize": 314601,
+    "shasum": "e1f151b474d904c99f2ecfe470e18cadc8eba772",
+    "integrity": "sha512-WWU9q7PXNnlFnuc1yF/tlWqbUyuVp1bylElisPYfJnZA2ZBoTM2yHGxLwQZ2snUufOnK2UW8XmBwTaTz/oZS1Q==",
+    "filename": "opencode-presence-discord-0.0.1.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1061,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 799,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/.gitkeep",
+        "size": 0,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/badge-agent.png",
+        "size": 36546,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/badge-agent.svg",
+        "size": 495,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/badge-model.png",
+        "size": 32594,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/badge-model.svg",
+        "size": 409,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/manifest.json",
+        "size": 2174,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/opencode_status_icons.zip",
+        "size": 80287,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/opencode.png",
+        "size": 4608,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/opencode.svg",
+        "size": 351,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-asking.png",
+        "size": 4820,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-asking.svg",
+        "size": 468,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-compacting.png",
+        "size": 4869,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-compacting.svg",
+        "size": 560,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-complete.png",
+        "size": 5154,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-complete.svg",
+        "size": 460,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-error.png",
+        "size": 5162,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-error.svg",
+        "size": 433,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-idle.png",
+        "size": 5166,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-idle.svg",
+        "size": 432,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-thinking.png",
+        "size": 4951,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-thinking.svg",
+        "size": 400,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-typing.png",
+        "size": 4921,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-typing.svg",
+        "size": 498,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-working.png",
+        "size": 4953,
+        "mode": 420
+      },
+      {
+        "path": "assets/discord/state-working.svg",
+        "size": 400,
+        "mode": 420
+      },
+      {
+        "path": "dist/tui.js",
+        "size": 110782,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 848,
+        "mode": 420
+      }
+    ],
+    "entryCount": 29,
+    "bundled": []
+  }
+}

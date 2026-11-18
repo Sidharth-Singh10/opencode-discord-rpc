@@ -172,7 +172,7 @@ const evidence = {
   generatedBy: "scripts/m0-record.ts from a real fresh run; no number hand-edited",
   source: {
     branch,
-    head,
+    headAtRunStart: head,
     workingTreeCleanAtRunStart: true,
     typecheck: "bun run typecheck",
     tests: "bun test",

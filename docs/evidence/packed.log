@@ -1,0 +1,13 @@
+PASS newest-assistant-identity-never-substitutes-supported-history
+PASS host-reasoning-variants-and-agent-vocabularies
+PASS authorized-rejection-closure-and-reconnect
+PASS concurrent-changing-message-delayed-ACK-reload
+PASS ACK-DB-lock-retry-and-no-newer-anchor
+PASS persistence-failure-reload-pending-distinct-from-ACK
+PASS stored-anchor-conflict-blocks-before-and-after-reload
+PASS dispose-pending-handshake-and-queued-commands
+PASS dispose-pending-ACK-and-snapshot-no-late-writes
+PASS two-unknown-servers-same-session-refuse-with-no-anchor
+PASS metadata-every-source-refused-publications-and-capture-privacy
+PASS pending-intent-post-ACK-outside-transaction-SIGSTOP-takeover-revoked-refusal-kill-recovery
+Packed entrypoint: 12 scenarios PASS (synthetic host + fake Discord)

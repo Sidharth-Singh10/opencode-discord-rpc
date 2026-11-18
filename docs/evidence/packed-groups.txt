@@ -1,0 +1,12 @@
+newest-assistant-identity-never-substitutes-supported-history
+host-reasoning-variants-and-agent-vocabularies
+authorized-rejection-closure-and-reconnect
+concurrent-changing-message-delayed-ACK-reload
+ACK-DB-lock-retry-and-no-newer-anchor
+persistence-failure-reload-pending-distinct-from-ACK
+stored-anchor-conflict-blocks-before-and-after-reload
+dispose-pending-handshake-and-queued-commands
+dispose-pending-ACK-and-snapshot-no-late-writes
+two-unknown-servers-same-session-refuse-with-no-anchor
+metadata-every-source-refused-publications-and-capture-privacy
+pending-intent-post-ACK-outside-transaction-SIGSTOP-takeover-revoked-refusal-kill-recovery

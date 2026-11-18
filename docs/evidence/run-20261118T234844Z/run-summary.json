@@ -1,0 +1,239 @@
+{
+  "milestone": "M0",
+  "gate": "NOT ACCEPTED",
+  "acceptanceOwner": "Jury",
+  "generatedAt": "2026-11-18T23:50:59.036Z",
+  "generatedBy": "scripts/m0-record.ts from a real fresh run; no number hand-edited",
+  "source": {
+    "branch": "m0/transmission-spike",
+    "headAtRunStart": "e34166f922d0a03cf36e9f8d2a4fbcde336b85d8",
+    "workingTreeCleanAtRunStart": true,
+    "typecheck": "bun run typecheck",
+    "tests": "bun test",
+    "build": "bun run build"
+  },
+  "lab": {
+    "path": "/tmp/opencode/discord-rpc-actor6.n8KoYO",
+    "availability": "ephemeral lab used to run the commands; not a durable evidence pointer",
+    "evidenceDir": "docs/evidence/run-20261118T234844Z/",
+    "logsMirroredTo": "docs/evidence/run-20261118T234844Z/"
+  },
+  "disclosures": {
+    "harnessModelIdentity": "opencode/deepseek-v4.1-flash-free is a harness test identity, not an executed model. Live evidence is real host, scripted inference.",
+    "liveEvidenceKind": "real host, scripted inference",
+    "liveEvidenceAvailable": false,
+    "liveEvidenceUnavailableReason": "the historical live labs were removed from /tmp; no live material is retained",
+    "retainedInRepo": "docs/evidence/run-20261118T234844Z/ (this run) and the earlier flat docs/evidence/*.log mirror"
+  },
+  "files": [
+    "src/discord/ipc.ts",
+    "src/m0/capture.ts",
+    "src/m0/probe.ts",
+    "src/m0/publisher.ts",
+    "src/m0/sanitize.ts",
+    "src/tui.tsx",
+    "scripts/m0-evidence.ts",
+    "scripts/m0-record.ts",
+    "scripts/pack-guard.ts",
+    "test/evidence-privacy.test.ts",
+    "test/identity-vocabulary.test.ts",
+    "test/inspection.test.ts",
+    "test/ipc-correlation.test.ts",
+    "test/m0.test.ts",
+    "test/validator.test.ts",
+    "test/fixtures/m0-evidence.ts",
+    "test/harness/packed-entrypoint.ts",
+    "test/harness/packed-host-process.ts",
+    "docs/M0.md",
+    "docs/M0-evidence.json",
+    "artifacts/README.md",
+    "artifacts/SHA256SUMS",
+    "artifacts/pack.json"
+  ],
+  "artifact": {
+    "path": "artifacts/opencode-presence-discord-0.0.1.tgz",
+    "sha256": "d9a74210570a410a580933da27e16b7b19221a4fc18e29b761991e2c531eabd9",
+    "bytes": 180559,
+    "immutableAfterPacking": true,
+    "bundlePath": "artifacts/dist/tui.js",
+    "bundleBytes": 110782,
+    "bundleSha256": "ad4b5bab76308f9062720353faee6ca5eb7944fad43cf36455d9b6fcaeb8a342",
+    "installedBundleSha256": "ad4b5bab76308f9062720353faee6ca5eb7944fad43cf36455d9b6fcaeb8a342",
+    "extractedBundleSha256": "ad4b5bab76308f9062720353faee6ca5eb7944fad43cf36455d9b6fcaeb8a342",
+    "extractedPath": "artifacts/extracted/package",
+    "checksums": "artifacts/SHA256SUMS",
+    "packManifest": "artifacts/pack.json",
+    "artifactReadme": "artifacts/README.md",
+    "installedBundleMatchesTarball": true,
+    "bundleMatchesTarball": true,
+    "entries": 29,
+    "publishedToNpm": false,
+    "assetsEdited": false
+  },
+  "repair": {
+    "J1": "Runtime projection before every sink; finite metadata vocabulary; fixed event categories and diagnostics. Agent names are shape-admitted, not reviewed: a lowercase secret-shaped agent may reach 0600 evidence but never the Discord payload.",
+    "J2": "Serialized publication through ACK/reconciliation; durable intent before enqueue; synchronous owner/fence check and enqueue; unresolved ACK retry and conflict refusal.",
+    "J3": "Unique correlated operations; duplicate/contradictory terminals rejected; two sessions and both unknown-session/identity refusals required.",
+    "J4": "Whole-array validation including sparse entries, IPv6 normalization, mixed-address refusal.",
+    "J5": "Pending connection ownership; immediate close and continuation invalidation; sink drain/close.",
+    "J6": "Unknown identity refuses publication and enrichment; no shared unknown anchor namespace.",
+    "J7": "No pruning added; M1-ANCHOR-GC follow-up documented."
+  },
+  "verification": {
+    "typecheck": {
+      "exitCode": 0,
+      "log": "docs/evidence/run-20261118T234844Z/typecheck.log"
+    },
+    "tests": {
+      "exitCode": 0,
+      "pass": 142,
+      "fail": 0,
+      "assertions": 616,
+      "files": 7,
+      "log": "docs/evidence/run-20261118T234844Z/test.log"
+    },
+    "build": {
+      "exitCode": 0,
+      "modules": 7,
+      "log": "docs/evidence/run-20261118T234844Z/build.log"
+    },
+    "packGuard": {
+      "exitCode": 0,
+      "heuristic": true,
+      "log": "docs/evidence/run-20261118T234844Z/pack-guard.log"
+    },
+    "pack": {
+      "exitCode": 0,
+      "log": "docs/evidence/run-20261118T234844Z/pack.log",
+      "tarball": "opencode-presence-discord-0.0.1.tgz"
+    },
+    "install": {
+      "exitCode": 0,
+      "log": "docs/evidence/run-20261118T234844Z/install.log"
+    },
+    "extract": {
+      "exitCode": 0,
+      "log": "docs/evidence/run-20261118T234844Z/extract.log"
+    },
+    "positiveValidatorFixture": {
+      "exitCode": 0,
+      "kind": "synthetic complete fixture",
+      "uniqueAcknowledged": 7,
+      "sessions": 2,
+      "snapshots": 2,
+      "paired": 27,
+      "log": "docs/evidence/run-20261118T234844Z/validator-positive.log"
+    },
+    "validatorFixtureSuite": {
+      "exitCode": 0,
+      "pass": 68,
+      "fail": 0,
+      "assertions": 128,
+      "files": 1,
+      "log": "docs/evidence/run-20261118T234844Z/validator-suite.log"
+    },
+    "packedEntrypoint": {
+      "exitCode": 0,
+      "kind": "synthetic Context and fake Discord; actual installed export, sockets, SQLite and processes",
+      "scenarioGroups": 13,
+      "groups": [
+        "newest-assistant-identity-never-substitutes-supported-history",
+        "host-reasoning-variants-and-agent-vocabularies",
+        "authorized-rejection-closure-and-reconnect",
+        "concurrent-changing-message-delayed-ACK-reload",
+        "ACK-DB-lock-retry-and-no-newer-anchor",
+        "disconnect-clear-refused-under-held-write-lock",
+        "persistence-failure-reload-pending-distinct-from-ACK",
+        "stored-anchor-conflict-blocks-before-and-after-reload",
+        "dispose-pending-handshake-and-queued-commands",
+        "dispose-pending-ACK-and-snapshot-no-late-writes",
+        "two-unknown-servers-same-session-refuse-with-no-anchor",
+        "metadata-every-source-refused-publications-and-capture-privacy",
+        "pending-intent-post-ACK-outside-transaction-SIGSTOP-takeover-revoked-refusal-kill-recovery"
+      ],
+      "status": "PASS",
+      "log": "docs/evidence/run-20261118T234844Z/packed.log",
+      "results": "docs/evidence/run-20261118T234844Z/packed-results.json",
+      "groupsFile": "docs/evidence/run-20261118T234844Z/packed-groups.txt"
+    },
+    "dependencyAudit": {
+      "exitCode": 1,
+      "vulnerabilities": 2,
+      "moderate": 2,
+      "high": 0,
+      "advisories": [
+        {
+          "severity": "moderate",
+          "package": "glob",
+          "id": "GHSA-3g3m-2fjr-6pw4"
+        },
+        {
+          "severity": "moderate",
+          "package": "minimatch",
+          "id": "GHSA-g3hv-75wg-m249"
+        }
+      ],
+      "newDependencies": false,
+      "observedReachableInM0": false,
+      "withdrawnAdvisories": [
+        {
+          "id": "GHSA-fc5q-39xc-vjpf",
+          "package": "picomatch",
+          "version": "4.0.7",
+          "lockLocation": "bun.lock:574",
+          "withdrawnOn": "2026-11-18",
+          "status": "withdrawn advisory, package still present",
+          "patchedVersion": null
+        }
+      ],
+      "followUp": "M1-DEPENDENCY-AUDIT",
+      "reviewBy": "2026-11-25",
+      "log": "docs/evidence/run-20261118T234844Z/audit.log"
+    },
+    "gitDiffCheck": {
+      "exitCode": 0,
+      "log": "docs/evidence/run-20261118T234844Z/git-diff-check.log"
+    },
+    "clearRefused": {
+      "tested": true,
+      "scenario": "disconnect-clear-refused-under-held-write-lock",
+      "mechanism": "external SQLite writer lock held by the test harness; the bundle contains no test hook",
+      "result": "the production disconnect path reaches clear-refused with a ready socket and a live owner, and enqueues no frame",
+      "log": "docs/evidence/run-20261118T234844Z/packed.log"
+    },
+    "realModelHostAttempt": {
+      "complete": false,
+      "blocker": "OpenCode free-model daily quota exhausted; no paid model selected; the attempt lab is unavailable",
+      "evidenceAvailable": false,
+      "identityDisclosure": "opencode/deepseek-v4.1-flash-free is a harness test identity, not an executed model"
+    },
+    "realHostScriptedModel": {
+      "kind": "real host, scripted inference: historical real OpenCode 2.3.0 host and real Discord IPC with LOCAL SCRIPTED inference, NOT real DeepSeek inference",
+      "evidenceAvailable": false,
+      "reason": "the historical live labs were removed from /tmp; not evidence for this tarball"
+    }
+  },
+  "scope": {
+    "zeroConnectionRefusals": "Claimed only for refusals reached before the socket opens. In-transaction enqueue-not-owner/revoked/busy refusals and a post-continue precheck refusal can occur with the socket already open.",
+    "agentEvidenceBoundary": "Agent names are shape-admitted (^[a-z][a-z0-9._-]{0,63}$), so a lowercase secret-shaped token can be persisted to 0600 evidence; it is never sent to Discord.",
+    "remote": {
+      "status": "descoped",
+      "integration": "unverified",
+      "claimed": false
+    },
+    "idleStatusAbsence": "sampled, not universal",
+    "visualReplacementArtifact": "human check open",
+    "anchorRetention": "unbounded qualified-session anchors and unresolved intent until an explicit M1 retention/GC policy",
+    "crashRecovery": "pending intent preserves anchor; an ACK lost before persistence is not claimed durably committed"
+  },
+  "cleanup": {
+    "generatedLab": "/tmp/opencode/discord-rpc-actor6.n8KoYO",
+    "evidenceRun": "docs/evidence/run-20261118T234844Z/",
+    "artifactRetained": "artifacts/opencode-presence-discord-0.0.1.tgz",
+    "publishedToNpm": false,
+    "assetsEdited": false,
+    "userConfigEdited": false,
+    "serviceEdited": false,
+    "note": "Packed scenarios create and remove their own runtime stores; the harness stops child hosts and fake Discord endpoints in its finally block."
+  }
+}

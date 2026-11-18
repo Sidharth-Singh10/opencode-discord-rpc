@@ -1,0 +1,5 @@
+Bundled 7 modules in 4ms
+
+  tui.js  110.78 KB  (entry point)
+
+$ bun build ./src/tui.tsx --outdir dist --target node --format esm --external @opencode/plugin --external @opencode/plugin/* --external @opencode/client --external @opencode/client/* --external bun:sqlite --external node:sqlite

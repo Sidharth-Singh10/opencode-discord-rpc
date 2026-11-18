@@ -1,0 +1,91 @@
+{
+  "name": "OpenCode state icon set",
+  "source": "User-provided OpenCode base symbol; geometry preserved",
+  "status_icon_size": [
+    1024,
+    1024
+  ],
+  "badge_size": [
+    512,
+    512
+  ],
+  "files": [
+    {
+      "key": "opencode",
+      "png": "opencode.png",
+      "svg": "opencode.svg",
+      "hover_text": "OpenCode",
+      "accent": null
+    },
+    {
+      "key": "state-working",
+      "png": "state-working.png",
+      "svg": "state-working.svg",
+      "hover_text": "OpenCode — Working",
+      "accent": "#34D399"
+    },
+    {
+      "key": "state-idle",
+      "png": "state-idle.png",
+      "svg": "state-idle.svg",
+      "hover_text": "OpenCode — Waiting for command",
+      "accent": "#8A8A9E"
+    },
+    {
+      "key": "state-asking",
+      "png": "state-asking.png",
+      "svg": "state-asking.svg",
+      "hover_text": "OpenCode — Waiting for you",
+      "accent": "#FBBF24"
+    },
+    {
+      "key": "state-thinking",
+      "png": "state-thinking.png",
+      "svg": "state-thinking.svg",
+      "hover_text": "OpenCode — Thinking",
+      "accent": "#38BDF8"
+    },
+    {
+      "key": "state-typing",
+      "png": "state-typing.png",
+      "svg": "state-typing.svg",
+      "hover_text": "OpenCode — Responding",
+      "accent": "#A78BFA"
+    },
+    {
+      "key": "state-compacting",
+      "png": "state-compacting.png",
+      "svg": "state-compacting.svg",
+      "hover_text": "OpenCode — Compacting context",
+      "accent": "#F472B6"
+    },
+    {
+      "key": "state-complete",
+      "png": "state-complete.png",
+      "svg": "state-complete.svg",
+      "hover_text": "OpenCode — Turn complete",
+      "accent": "#34D399"
+    },
+    {
+      "key": "state-error",
+      "png": "state-error.png",
+      "svg": "state-error.svg",
+      "hover_text": "OpenCode — Turn failed",
+      "accent": "#F87171"
+    },
+    {
+      "key": "badge-model",
+      "png": "badge-model.png",
+      "svg": "badge-model.svg",
+      "hover_text": "{model}",
+      "accent": "#34D399"
+    },
+    {
+      "key": "badge-agent",
+      "png": "badge-agent.png",
+      "svg": "badge-agent.svg",
+      "hover_text": "{agent}",
+      "accent": "#34D399"
+    }
+  ]
+}

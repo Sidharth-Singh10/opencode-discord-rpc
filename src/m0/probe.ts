@@ -27,9 +27,11 @@ export interface SqliteBackend {
   open(path: string): SqliteHandle
 }
 
+export type ProbeCode = "import-failed" | "probe-failed" | "select-mismatch"
+
 export interface ProbeStage {
   ok: boolean
-  detail?: string
+  code?: ProbeCode
 }
 
 export interface RuntimeProbe {
@@ -43,7 +45,6 @@ export interface RuntimeProbe {
     platform: string
     arch: string
     pid: number
-    execPath: string
   }
   imports: {
     net: ProbeStage & { createConnection: boolean }
@@ -57,20 +58,14 @@ export interface RuntimeProbe {
   }
 }
 
-const sqliteModules = new Map<SqliteKind, unknown>()
-
-async function importModule(specifier: string): Promise<{ ok: true; mod: unknown } | { ok: false; error: string }> {
+async function importModule(specifier: string): Promise<{ ok: true; mod: unknown } | { ok: false; code: ProbeCode }> {
   try {
     // Variable specifier: bundlers must leave this to the runtime.
     const mod: unknown = await import(specifier)
     return { ok: true, mod }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } catch {
+    return { ok: false, code: "import-failed" }
   }
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 function bunBackend(mod: any): SqliteBackend {
@@ -119,12 +114,12 @@ function probeSqliteModule(kind: SqliteKind, mod: any): ProbeStage & { selectOne
       db.exec("CREATE TABLE probe (value INTEGER NOT NULL)")
       db.run("INSERT INTO probe (value) VALUES (?)", 1)
       const row = db.get<{ value: number }>("SELECT value FROM probe LIMIT 1")
-      return { ok: row?.value === 1, selectOne: row?.value, detail: row?.value === 1 ? undefined : "SELECT 1 returned no row" }
+      return { ok: row?.value === 1, selectOne: row?.value, ...(row?.value === 1 ? {} : { code: "select-mismatch" as const }) }
     } finally {
       db.close()
     }
-  } catch (error) {
-    return { ok: false, detail: errorText(error) }
+  } catch {
+    return { ok: false, code: "probe-failed" }
   }
 }
 
@@ -149,10 +144,9 @@ export async function probeRuntime(context: Context): Promise<{ report: RuntimeP
       platform: platform(),
       arch: arch(),
       pid: process.pid,
-      execPath: process.execPath,
     },
     imports: {
-      net: { ok: netImport.ok && netCreate, createConnection: netCreate, ...(netImport.ok ? {} : { detail: netImport.error }) },
+      net: { ok: netImport.ok && netCreate, createConnection: netCreate, ...(netImport.ok ? {} : { code: netImport.code }) },
       "bun:sqlite": bunStage,
       "node:sqlite": nodeStage,
     },
@@ -176,17 +170,15 @@ export async function loadSqliteBackend(): Promise<{
 
   const bunStage: ProbeStage & { selectOne?: number } = bunImport.ok
     ? probeSqliteModule("bun:sqlite", bunImport.mod)
-    : { ok: false, detail: bunImport.error }
+    : { ok: false, code: bunImport.code }
   const nodeStage: ProbeStage & { selectOne?: number } = nodeSqliteImport.ok
     ? probeSqliteModule("node:sqlite", nodeSqliteImport.mod)
-    : { ok: false, detail: nodeSqliteImport.error }
+    : { ok: false, code: nodeSqliteImport.code }
 
   if (bunStage.ok && bunImport.ok) {
-    sqliteModules.set("bun:sqlite", bunImport.mod)
     return { backend: bunBackend(bunImport.mod), bun: bunStage, node: nodeStage }
   }
   if (nodeStage.ok && nodeSqliteImport.ok) {
-    sqliteModules.set("node:sqlite", nodeSqliteImport.mod)
     return { backend: nodeBackend(nodeSqliteImport.mod), bun: bunStage, node: nodeStage }
   }
   return { backend: null, bun: bunStage, node: nodeStage }
@@ -226,16 +218,25 @@ export function localHostname(): string {
   return hostname()
 }
 
+export type LocalityReason =
+  | "host-and-urls-match"
+  | "host-mismatch"
+  | "url-not-loopback"
+  | "identity-incomplete"
+  | "server-info-unavailable"
+
 export interface LocalityClassification {
   class: "local" | "remote" | "unknown"
   enrichment: "allowed" | "refused"
-  reason: string
+  reason: LocalityReason
+  /** Hash of the observed server identity; never the raw host or URLs. */
+  serverFingerprint: string | null
   evidence: {
     method: "server.info" | "none"
-    serverHostname?: string
-    localHostname: string
-    urls?: string[]
-    error?: string
+    hostnamePresent: boolean
+    hostnameMatches: boolean | null
+    urlCount: number
+    allUrlsLoopback: boolean | null
   }
   observedAt: string
 }
@@ -243,53 +244,72 @@ export interface LocalityClassification {
 function isLoopbackHost(value: string): boolean {
   const host = value.replace(/^\[/, "").replace(/\]$/, "").split(":")[0]
   if (!host) return false
-  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0"
+  return host === "localhost" || host === "127.0.0.1" || host === "::1"
+}
+
+function fingerprintIdentity(serverHostname: string, urls: string[]): string {
+  return createHash("sha256").update(serverHostname).update("\u0000").update([...urls].sort().join("\u0000")).digest("hex").slice(0, 16)
 }
 
 /**
- * M0 classifies the connected server. Only a proven local server may ever
- * enrich from a local session database; unknown and remote both refuse.
+ * Fail closed: only a complete identity that names this host and advertises
+ * exclusively loopback URLs is `local`. Missing, empty or malformed identity is
+ * `unknown`; a differing host or non-loopback URL is `remote`. Both refuse
+ * local-DB enrichment. Raw hostnames, URLs and exception text are never kept.
  */
 export async function classifyLocality(context: Context): Promise<LocalityClassification> {
   const local = localHostname()
+  const observedAt = new Date().toISOString()
+  const unknown = (reason: LocalityReason, hostnamePresent: boolean, hostnameMatches: boolean | null, urlCount: number, allUrlsLoopback: boolean | null): LocalityClassification => ({
+    class: "unknown",
+    enrichment: "refused",
+    reason,
+    serverFingerprint: null,
+    evidence: { method: reason === "server-info-unavailable" ? "none" : "server.info", hostnamePresent, hostnameMatches, urlCount, allUrlsLoopback },
+    observedAt,
+  })
+
+  let info: { hostname?: unknown; urls?: unknown }
   try {
-    const info = await context.client.server.info({})
-    const urls = info.urls ?? []
-    const loopbackURLs = urls.filter((url) => {
-      try {
-        const parsed = new URL(url)
-        return isLoopbackHost(parsed.hostname)
-      } catch {
-        return false
-      }
-    })
-    const hostMatch = info.hostname !== undefined && (info.hostname === local || info.hostname === "localhost")
-    const sameHost = info.hostname === undefined || hostMatch
-    const localURLs = urls.length === 0 || loopbackURLs.length === urls.length
-    if (sameHost && localURLs) {
-      return {
-        class: "local",
-        enrichment: "allowed",
-        reason: "server.info hostname and every advertised URL resolve to this host",
-        evidence: { method: "server.info", serverHostname: info.hostname, localHostname: local, urls },
-        observedAt: new Date().toISOString(),
-      }
+    info = (await context.client.server.info({})) as { hostname?: unknown; urls?: unknown }
+  } catch {
+    return unknown("server-info-unavailable", false, null, 0, null)
+  }
+
+  const hostname = typeof info?.hostname === "string" && info.hostname.trim().length > 0 ? info.hostname : null
+  const urls = Array.isArray(info?.urls) ? info.urls.filter((url): url is string => typeof url === "string" && url.length > 0) : []
+  const hostnamePresent = hostname !== null
+  const hostnameMatches = hostname === null ? null : hostname === local || hostname === "localhost"
+  const parsed = urls.map((url) => {
+    try {
+      return new URL(url)
+    } catch {
+      return null
     }
+  })
+  const validURLs = parsed.every((url) => url !== null)
+  const allUrlsLoopback = urls.length > 0 && validURLs ? parsed.every((url) => url !== null && isLoopbackHost(url.hostname)) : null
+
+  if (!hostnamePresent || urls.length === 0 || !validURLs) {
+    return unknown("identity-incomplete", hostnamePresent, hostnameMatches, urls.length, allUrlsLoopback)
+  }
+  if (hostnameMatches !== true || allUrlsLoopback !== true) {
     return {
       class: "remote",
       enrichment: "refused",
-      reason: "server.info hostname or URL is not this host",
-      evidence: { method: "server.info", serverHostname: info.hostname, localHostname: local, urls },
-      observedAt: new Date().toISOString(),
+      reason: hostnameMatches !== true ? "host-mismatch" : "url-not-loopback",
+      serverFingerprint: fingerprintIdentity(hostname, urls),
+      evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount: urls.length, allUrlsLoopback },
+      observedAt,
     }
-  } catch (error) {
-    return {
-      class: "unknown",
-      enrichment: "refused",
-      reason: "server identity could not be observed; local-DB enrichment refused",
-      evidence: { method: "none", localHostname: local, error: errorText(error) },
-      observedAt: new Date().toISOString(),
-    }
+  }
+  return {
+    class: "local",
+    enrichment: "allowed",
+    reason: "host-and-urls-match",
+    serverFingerprint: fingerprintIdentity(hostname, urls),
+    evidence: { method: "server.info", hostnamePresent, hostnameMatches, urlCount: urls.length, allUrlsLoopback },
+    observedAt,
   }
 }
 
@@ -311,49 +331,42 @@ export interface SessionInspection {
   executedModel: ModelRefLike | null
   agent: string | null
   messageCount: number
-  lastUserMessageAtMs: number | null
-  lastUserMessageSource: string | null
-  frozenTimestampSeconds: number | null
-  frozenTimestampSource: string | null
+  latestUserMessageAtMs: number | null
+  latestUserMessageSource: string | null
+  candidateTimestampSeconds: number | null
+  candidateTimestampError: TimestampErrorCode | null
   timestampOriginalUnits: string | null
-  timestampRefusal: string | null
-  errors: string[]
+  errorCodes: string[]
 }
 
-const frozenTimestamps = new Map<string, { seconds: number; source: string; originalMs: number }>()
-
-export function resetFrozenTimestamps(): void {
-  frozenTimestamps.clear()
-}
+export type TimestampErrorCode = "timestamp-missing" | "timestamp-invalid" | "timestamp-implausible" | "timestamp-future"
 
 /**
- * Freeze the current user-message creation time for the session. If no user
- * message exists, publication is refused; startup/publish time is never used.
+ * Pure conversion. Nothing is committed here; the publisher commits the anchor
+ * only after a Discord acknowledgment.
  */
-export function timestampForSession(
-  sessionID: string,
-  lastUserMessageAtMs: number | null,
-  source: string | null,
-): { seconds: number; source: string; originalMs: number } | { error: string } {
-  const frozen = frozenTimestamps.get(sessionID)
-  if (frozen) return frozen
-  if (lastUserMessageAtMs === null || source === null) {
-    return { error: "no user message creation timestamp is exposed for this session" }
-  }
-  if (!Number.isFinite(lastUserMessageAtMs) || lastUserMessageAtMs <= 0) {
-    return { error: `session timestamp is not a finite positive number: ${String(lastUserMessageAtMs)}` }
-  }
-  const seconds = Math.floor(lastUserMessageAtMs / 1000)
-  if (!Number.isSafeInteger(seconds) || seconds < 1_000_000_000) {
-    return { error: `session timestamp does not convert to a plausible integer Unix second: ${lastUserMessageAtMs}` }
-  }
-  const nowSeconds = Math.floor(Date.now() / 1000)
-  if (seconds > nowSeconds + 300) {
-    return { error: `session timestamp is more than 5 minutes in the future: ${seconds} > ${nowSeconds}` }
-  }
-  const frozenValue = { seconds, source, originalMs: lastUserMessageAtMs }
-  frozenTimestamps.set(sessionID, frozenValue)
-  return frozenValue
+export function toUnixSeconds(createdMs: number | null): { seconds: number } | { code: TimestampErrorCode } {
+  if (createdMs === null) return { code: "timestamp-missing" }
+  if (!Number.isFinite(createdMs) || createdMs <= 0) return { code: "timestamp-invalid" }
+  const seconds = Math.floor(createdMs / 1000)
+  if (!Number.isSafeInteger(seconds) || seconds < 1_000_000_000) return { code: "timestamp-implausible" }
+  if (seconds > Math.floor(Date.now() / 1000) + 300) return { code: "timestamp-future" }
+  return { seconds }
+}
+
+export interface TimestampAnchor {
+  seconds: number
+  sourceCreatedMs: number
+}
+
+export function resolveSessionTimestamp(
+  anchor: TimestampAnchor | null,
+  latestUserMessageAtMs: number | null,
+): { seconds: number; sourceCreatedMs: number; committed: boolean } | { code: TimestampErrorCode } {
+  if (anchor) return { seconds: anchor.seconds, sourceCreatedMs: anchor.sourceCreatedMs, committed: true }
+  const converted = toUnixSeconds(latestUserMessageAtMs)
+  if ("code" in converted) return converted
+  return { seconds: converted.seconds, sourceCreatedMs: latestUserMessageAtMs as number, committed: false }
 }
 
 export async function inspectSession(context: Context, sessionID: string, salt: string): Promise<SessionInspection> {
@@ -370,13 +383,12 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     executedModel: null,
     agent: null,
     messageCount: 0,
-    lastUserMessageAtMs: null,
-    lastUserMessageSource: null,
-    frozenTimestampSeconds: null,
-    frozenTimestampSource: null,
+    latestUserMessageAtMs: null,
+    latestUserMessageSource: null,
+    candidateTimestampSeconds: null,
+    candidateTimestampError: null,
     timestampOriginalUnits: null,
-    timestampRefusal: null,
-    errors,
+    errorCodes: errors,
   }
 
   let info = context.data.session.get(sessionID)
@@ -384,8 +396,8 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     try {
       await context.data.session.sync(sessionID)
       info = context.data.session.get(sessionID)
-    } catch (error) {
-      errors.push(`session.sync: ${errorText(error)}`)
+    } catch {
+      errors.push("session-sync-failed")
     }
   }
   if (!info) {
@@ -396,13 +408,13 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
   inspection.found = true
   try {
     inspection.status = context.data.session.status(sessionID)
-  } catch (error) {
-    errors.push(`session.status: ${errorText(error)}`)
+  } catch {
+    errors.push("session-status-failed")
   }
   try {
     inspection.sessionCost = context.data.session.cost(sessionID)
-  } catch (error) {
-    errors.push(`session.cost: ${errorText(error)}`)
+  } catch {
+    errors.push("session-cost-failed")
   }
   inspection.reportedCost = info.cost ?? null
   if (info.tokens) {
@@ -420,8 +432,8 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     // The prompt's selection can drift from the model that actually ran.
     const current = context.ui.model.current()
     if (current) inspection.selectedModel = { id: current.modelID, providerID: current.providerID, ...(current.variant ? { variant: current.variant } : {}) }
-  } catch (error) {
-    errors.push(`ui.model.current: ${errorText(error)}`)
+  } catch {
+    errors.push("model-selection-unavailable")
   }
   if (!inspection.selectedModel && info.model) {
     inspection.selectedModel = { id: info.model.id, providerID: info.model.providerID, ...(info.model.variant ? { variant: info.model.variant } : {}) }
@@ -432,8 +444,8 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     try {
       await context.data.session.message.sync(sessionID)
       messages = context.data.session.message.list(sessionID)
-    } catch (error) {
-      errors.push(`session.message.sync: ${errorText(error)}`)
+    } catch {
+      errors.push("message-sync-failed")
     }
   }
   inspection.messageCount = messages.length
@@ -457,18 +469,17 @@ export async function inspectSession(context: Context, sessionID: string, salt: 
     const message = messages[index]
     if (!message || message.type !== "user") continue
     if (typeof message.time?.created === "number") {
-      inspection.lastUserMessageAtMs = message.time.created
-      inspection.lastUserMessageSource = "session.message.list[].type=user.time.created"
+      inspection.latestUserMessageAtMs = message.time.created
+      inspection.latestUserMessageSource = "session.message.list[].type=user.time.created"
     }
     break
   }
 
-  const timestamp = timestampForSession(sessionID, inspection.lastUserMessageAtMs, inspection.lastUserMessageSource)
-  if ("error" in timestamp) {
-    inspection.timestampRefusal = timestamp.error
+  const timestamp = toUnixSeconds(inspection.latestUserMessageAtMs)
+  if ("code" in timestamp) {
+    inspection.candidateTimestampError = timestamp.code
   } else {
-    inspection.frozenTimestampSeconds = timestamp.seconds
-    inspection.frozenTimestampSource = timestamp.source
+    inspection.candidateTimestampSeconds = timestamp.seconds
     inspection.timestampOriginalUnits = "milliseconds since Unix epoch (converted with floor(ms/1000))"
   }
 

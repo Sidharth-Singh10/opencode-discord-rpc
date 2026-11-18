@@ -1,6 +1,10 @@
 /**
- * Build-before-pack protection. Runs on `prepack` after the build and refuses
- * to produce a tarball from a stale or mis-shaped package.
+ * Build-before-pack protection. Runs after the build and refuses to pack a
+ * stale entrypoint, a mis-shaped package or a bundle that contains known
+ * test-only controls.
+ *
+ * This is a heuristic M0 guard, not dependency-graph enforcement. A metafile
+ * check that proves the full externalised dependency graph is an M1 obligation.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
@@ -44,8 +48,10 @@ else {
   }
   const text = readFileSync(entry, "utf8")
   if (text.includes("jsxDEV") || text.includes("solid-js/jsx")) fail("dist/tui.js contains JSX runtime output")
-  if (/from\s+["']@opencode\/client["']/.test(text)) fail("dist/tui.js bundles @opencode/client; it must stay external")
-  if (/from\s+["']@opencode\/plugin["']/.test(text)) fail("dist/tui.js bundles @opencode/plugin; it must stay external")
+  if (text.includes("holdCriticalMs") || text.includes("onCriticalEnter") || text.includes("M0_HOLD_CRITICAL")) {
+    fail("dist/tui.js contains a test-only control path")
+  }
+  if (text.includes("test/harness") || text.includes("publisher-process.ts")) fail("dist/tui.js references the test harness")
 }
 
 if (failures.length > 0) {
@@ -53,4 +59,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`  - ${failure}`)
   process.exit(1)
 }
-console.log("pack-guard: dist/tui.js is present, current and correctly externalised")
+console.log("pack-guard: entrypoint present and current; package shape and test-hook scan OK (heuristic M0 check)")

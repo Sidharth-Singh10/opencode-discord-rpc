@@ -6,9 +6,12 @@
  * owner + fence in the same IMMEDIATE transaction that performs the
  * synchronous socket write. No await, handshake or response wait is allowed
  * in that section.
+ *
+ * The store opens lazily and the retry timer is always armed, so a startup
+ * write lock is a recoverable contention case rather than a terminal error.
  */
 import { randomUUID } from "node:crypto"
-import { closeSync, lstatSync, mkdirSync, openSync, statSync, chmodSync } from "node:fs"
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, statSync } from "node:fs"
 import { join } from "node:path"
 
 import type { SqliteBackend, SqliteHandle } from "./probe.js"
@@ -28,17 +31,28 @@ export interface OwnerRow {
   heartbeatMs: number
 }
 
+export type PublisherErrorCode =
+  | "store-unavailable"
+  | "closed"
+  | "contended"
+  | "acquire-failed"
+  | "renew-failed"
+  | "release-failed"
+  | "critical-failed"
+
 export type Acquisition =
   | { status: "acquired"; fence: number }
   | { status: "renewed"; fence: number }
   | { status: "takeover"; fence: number; previous: OwnerRow }
   | { status: "contended"; fence: number; owner: OwnerRow }
-  | { status: "revoked"; reason: string }
-  | { status: "error"; reason: string }
+  | { status: "revoked"; reason: RevokeReason }
+  | { status: "error"; code: PublisherErrorCode }
+
+export type RevokeReason = "fence-changed" | "owner-row-gone" | "release-fence-mismatch" | "fence-mismatch"
 
 export type CriticalResult<T> =
   | { ok: true; value: T; fence: number }
-  | { ok: false; reason: "not-owner" | "revoked" | "busy" | "no-store" | "error"; error?: string }
+  | { ok: false; reason: "not-owner" | "revoked" | "busy" | "no-store" | "error" }
 
 export interface PublisherEvent {
   kind: "acquire" | "renew" | "takeover" | "contended" | "release" | "revoke" | "critical" | "error"
@@ -48,8 +62,8 @@ export interface PublisherEvent {
   generation: string
   fence?: number
   previousFence?: number
-  reason?: string
-  detail?: string
+  reason?: RevokeReason | "busy"
+  code?: PublisherErrorCode
 }
 
 export interface PublisherOptions {
@@ -60,27 +74,29 @@ export interface PublisherOptions {
   tickMs?: number
   now?: () => number
   onEvent?: (event: PublisherEvent) => void
-  onRevoked?: (reason: string) => void
-  /** Test-only: called inside the verified critical section, before enqueue. */
-  onCriticalEnter?: () => void
-  /** Test-only: busy-wait inside the critical section. Never set in production. */
-  holdCriticalMs?: number
+  onRevoked?: (reason: RevokeReason) => void
   /** Caller-supplied identity so evidence file names and lease rows agree. */
   identity?: OwnerIdentity
 }
 
+export interface Anchor {
+  seconds: number
+  sourceCreatedMs: number
+  committedMs: number
+}
+
 const OWNER_COLUMNS = "instance_id, pid, generation, fence, acquired_ms, heartbeat_ms"
+const SESSION_KEY = /^[0-9a-f]{64}$/
 
 export class Publisher {
   readonly identity: OwnerIdentity
   readonly dbPath: string
-  private readonly options: Required<Omit<PublisherOptions, "onEvent" | "onRevoked" | "holdCriticalMs" | "onCriticalEnter" | "identity">> & {
+  private readonly options: Required<Omit<PublisherOptions, "onEvent" | "onRevoked" | "identity">> & {
     onEvent?: (event: PublisherEvent) => void
-    onRevoked?: (reason: string) => void
-    onCriticalEnter?: () => void
-    holdCriticalMs?: number
+    onRevoked?: (reason: RevokeReason) => void
   }
   private db: SqliteHandle | null = null
+  private storeReady = false
   private timer: ReturnType<typeof setInterval> | null = null
   private owned = false
   private fence = 0
@@ -98,8 +114,6 @@ export class Publisher {
       now: options.now ?? Date.now,
       onEvent: options.onEvent,
       onRevoked: options.onRevoked,
-      onCriticalEnter: options.onCriticalEnter,
-      holdCriticalMs: options.holdCriticalMs,
     }
     const identity = options.identity ?? { instanceId: randomUUID(), pid: process.pid, generation: randomUUID() }
     this.identity = { instanceId: identity.instanceId, pid: identity.pid, generation: identity.generation }
@@ -123,46 +137,36 @@ export class Publisher {
   }
 
   start(): Acquisition {
-    if (this.closed) return { status: "error", reason: "publisher already closed" }
-    try {
-      this.prepareRuntimeDir()
-      this.db = this.options.backend.open(this.dbPath)
-      this.db.exec("PRAGMA journal_mode = WAL")
-      this.db.exec("PRAGMA synchronous = FULL")
-      this.initSchema()
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "error", reason })
-      return { status: "error", reason }
-    }
-
-    const first = this.tryAcquire()
+    if (this.closed) return { status: "error", code: "closed" }
+    // Arm first: a startup lock must not kill recovery.
     this.armTimer()
-    return first
+    if (!this.openStore()) return { status: "error", code: "store-unavailable" }
+    return this.tryAcquire()
   }
 
-  /** One asynchronous retry path. Contention never blocks the caller. */
+  /** The only retry path; the timer calls it, no auxiliary process does. */
   tick(): Acquisition | null {
-    if (this.closed || this.revoked || this.paused || !this.db) return null
+    if (this.closed || this.revoked || this.paused) return null
+    if (!this.openStore()) return { status: "error", code: "store-unavailable" }
     const result = this.owned ? this.renew() : this.tryAcquire()
     if (result.status === "revoked") this.revoke(result.reason)
     return result
   }
 
   criticalEnqueue<T>(enqueue: () => T): CriticalResult<T> {
-    if (!this.db) return { ok: false, reason: "no-store" }
+    if (!this.storeReady || !this.db) return { ok: false, reason: "no-store" }
     if (this.revoked || this.closed) return { ok: false, reason: "revoked" }
     try {
       this.db.exec("BEGIN IMMEDIATE")
-    } catch (error) {
-      return { ok: false, reason: "busy", error: error instanceof Error ? error.message : String(error) }
+    } catch {
+      return { ok: false, reason: "busy" }
     }
 
     try {
       const owner = this.readOwner()
       if (!this.matches(owner)) {
         this.db.exec("ROLLBACK")
-        this.emit({ kind: "critical", reason: "not-owner", fence: owner?.fence })
+        this.emit({ kind: "critical", reason: "fence-mismatch", fence: owner?.fence })
         this.revoke("fence-mismatch")
         return { ok: false, reason: "not-owner" }
       }
@@ -172,33 +176,25 @@ export class Publisher {
         this.identity.instanceId,
         this.fence,
       )
-      this.options.onCriticalEnter?.()
       // Synchronous only. This is the guarantee boundary: once this returns,
       // the frame is handed to the OS and cannot be recalled.
       const value = enqueue()
-      if (this.options.holdCriticalMs && this.options.holdCriticalMs > 0) {
-        const until = this.options.now() + this.options.holdCriticalMs
-        while (this.options.now() < until) {
-          // Test-only synchronous hold.
-        }
-      }
       this.db.exec("COMMIT")
       this.emit({ kind: "critical", fence: this.fence })
       return { ok: true, value, fence: this.fence }
-    } catch (error) {
+    } catch {
       try {
         this.db.exec("ROLLBACK")
       } catch {
-        // The transaction may already be gone; keep the original error.
+        // The transaction may already be gone.
       }
-      const message = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "error", reason: "critical-enqueue", detail: message })
-      return { ok: false, reason: "error", error: message }
+      this.emit({ kind: "error", code: "critical-failed" })
+      return { ok: false, reason: "error" }
     }
   }
 
   release(): boolean {
-    if (!this.db || !this.owned || this.revoked) {
+    if (!this.storeReady || !this.db || !this.owned || this.revoked) {
       this.disarmTimer()
       return false
     }
@@ -219,15 +215,16 @@ export class Publisher {
       this.paused = true
       this.disarmTimer()
       return true
-    } catch (error) {
-      this.emit({ kind: "error", reason: "release", detail: error instanceof Error ? error.message : String(error) })
+    } catch {
+      this.emit({ kind: "error", code: "release-failed" })
       return false
     }
   }
 
   /** Re-enter arbitration after an explicit release, e.g. publish after disconnect. */
   resume(): Acquisition | null {
-    if (this.closed || this.revoked || !this.db) return null
+    if (this.closed || this.revoked) return null
+    if (!this.openStore()) return { status: "error", code: "store-unavailable" }
     this.paused = false
     this.armTimer()
     return this.owned ? this.renew() : this.tryAcquire()
@@ -238,6 +235,7 @@ export class Publisher {
     this.disarmTimer()
     if (this.owned && !this.revoked) this.release()
     this.closed = true
+    this.storeReady = false
     try {
       this.db?.close()
     } catch {
@@ -247,7 +245,7 @@ export class Publisher {
   }
 
   ownerSnapshot(): OwnerRow | null {
-    if (!this.db) return null
+    if (!this.storeReady || !this.db) return null
     try {
       return this.readOwner()
     } catch {
@@ -255,29 +253,88 @@ export class Publisher {
     }
   }
 
+  /** Read the committed timestamp anchor for a server-qualified session. */
+  readAnchor(sessionKey: string): Anchor | null {
+    if (!SESSION_KEY.test(sessionKey) || !this.openStore() || !this.db) return null
+    try {
+      const row = this.db.get<{ seconds: number; source_created_ms: number; committed_ms: number }>(
+        "SELECT seconds, source_created_ms, committed_ms FROM anchor WHERE session_key = ?",
+        sessionKey,
+      )
+      if (!row || !Number.isSafeInteger(row.seconds) || !Number.isSafeInteger(row.source_created_ms)) return null
+      return { seconds: row.seconds, sourceCreatedMs: row.source_created_ms, committedMs: row.committed_ms }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Commit an anchor after an acknowledged publication. INSERT OR IGNORE keeps
+   * the first successful anchor for a session; a failed send never reaches here.
+   */
+  commitAnchor(sessionKey: string, seconds: number, sourceCreatedMs: number): boolean {
+    if (!SESSION_KEY.test(sessionKey)) return false
+    if (!Number.isSafeInteger(seconds) || seconds < 1_000_000_000 || !Number.isSafeInteger(sourceCreatedMs) || sourceCreatedMs <= 0) return false
+    if (!this.openStore() || !this.db) return false
+    try {
+      this.db.run(
+        "INSERT OR IGNORE INTO anchor (session_key, seconds, source_created_ms, committed_ms) VALUES (?, ?, ?, ?)",
+        sessionKey,
+        seconds,
+        sourceCreatedMs,
+        this.options.now(),
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private openStore(): boolean {
+    if (this.storeReady && this.db) return true
+    if (this.closed) return false
+    try {
+      this.prepareRuntimeDir()
+      this.db = this.options.backend.open(this.dbPath)
+      this.db.exec("PRAGMA journal_mode = WAL")
+      this.db.exec("PRAGMA synchronous = FULL")
+      this.initSchema()
+      this.storeReady = true
+      return true
+    } catch {
+      try {
+        this.db?.close()
+      } catch {
+        // Ignore a failed cleanup attempt.
+      }
+      this.db = null
+      this.storeReady = false
+      this.emit({ kind: "error", code: "store-unavailable" })
+      return false
+    }
+  }
+
   private prepareRuntimeDir(): void {
     mkdirSync(this.options.runtimeDir, { recursive: true, mode: 0o700 })
     const stat = lstatSync(this.options.runtimeDir)
-    if (stat.isSymbolicLink()) throw new Error(`runtime dir is a symlink: ${this.options.runtimeDir}`)
-    if (!stat.isDirectory()) throw new Error(`runtime dir is not a directory: ${this.options.runtimeDir}`)
+    if (stat.isSymbolicLink()) throw new Error("unsafe runtime dir")
+    if (!stat.isDirectory()) throw new Error("unsafe runtime dir")
     const uid = typeof process.getuid === "function" ? process.getuid() : undefined
-    if (uid !== undefined && stat.uid !== uid) throw new Error("runtime dir is owned by another user")
+    if (uid !== undefined && stat.uid !== uid) throw new Error("unsafe runtime dir ownership")
     if ((stat.mode & 0o077) !== 0) {
       chmodSync(this.options.runtimeDir, 0o700)
       const tightened = statSync(this.options.runtimeDir)
-      if ((tightened.mode & 0o077) !== 0) throw new Error("runtime dir could not be tightened to 0700")
+      if ((tightened.mode & 0o077) !== 0) throw new Error("unsafe runtime dir mode")
     }
 
-    // The DB is opened by SQLite; refuse a symlink or foreign-owned file first.
     try {
       const dbStat = lstatSync(this.dbPath)
-      if (dbStat.isSymbolicLink()) throw new Error("publisher.sqlite is a symlink")
-      if (!dbStat.isFile()) throw new Error("publisher.sqlite is not a regular file")
-      if (uid !== undefined && dbStat.uid !== uid) throw new Error("publisher.sqlite is owned by another user")
+      if (dbStat.isSymbolicLink()) throw new Error("unsafe coordination file")
+      if (!dbStat.isFile()) throw new Error("unsafe coordination file")
+      if (uid !== undefined && dbStat.uid !== uid) throw new Error("unsafe coordination ownership")
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code !== "ENOENT") throw error
-      // Create it exclusively so a racing symlink cannot be followed.
       const fd = openSync(this.dbPath, "wx", 0o600)
       closeSync(fd)
     }
@@ -299,6 +356,12 @@ export class Publisher {
         acquired_ms INTEGER NOT NULL,
         heartbeat_ms INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS anchor (
+        session_key TEXT PRIMARY KEY,
+        seconds INTEGER NOT NULL,
+        source_created_ms INTEGER NOT NULL,
+        committed_ms INTEGER NOT NULL
+      );
     `)
     this.db.run("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", "fence", "0")
   }
@@ -308,7 +371,6 @@ export class Publisher {
     this.timer = setInterval(() => {
       this.tick()
     }, this.options.tickMs)
-    // Do not keep a closing TUI alive just for the lease.
     if (typeof this.timer === "object" && this.timer && "unref" in this.timer) {
       ;(this.timer as { unref?: () => void }).unref?.()
     }
@@ -320,12 +382,11 @@ export class Publisher {
   }
 
   private tryAcquire(): Acquisition {
-    if (!this.db) return { status: "error", reason: "no db" }
+    if (!this.db) return { status: "error", code: "store-unavailable" }
     try {
       this.db.exec("BEGIN IMMEDIATE")
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "contended", reason: "busy", detail: reason })
+    } catch {
+      this.emit({ kind: "contended", reason: "busy" })
       return { status: "contended", fence: -1, owner: { instanceId: "", pid: 0, generation: "", fence: -1, acquiredMs: 0, heartbeatMs: 0 } }
     }
     try {
@@ -380,26 +441,23 @@ export class Publisher {
       this.owned = false
       this.emit({ kind: "contended", fence: owner.fence })
       return { status: "contended", fence: owner.fence, owner }
-    } catch (error) {
+    } catch {
       try {
         this.db.exec("ROLLBACK")
       } catch {
         // Already rolled back.
       }
-      const reason = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "error", reason: "acquire", detail: reason })
-      return { status: "error", reason }
+      this.emit({ kind: "error", code: "acquire-failed" })
+      return { status: "error", code: "acquire-failed" }
     }
   }
 
   private renew(): Acquisition {
-    if (!this.db) return { status: "error", reason: "no db" }
+    if (!this.db) return { status: "error", code: "store-unavailable" }
     try {
       this.db.exec("BEGIN IMMEDIATE")
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "error", reason: "renew-busy", detail: reason })
-      return { status: "error", reason }
+    } catch {
+      return { status: "error", code: "contended" }
     }
     try {
       const owner = this.readOwner()
@@ -411,19 +469,18 @@ export class Publisher {
       this.db.exec("COMMIT")
       this.emit({ kind: "renew", fence: this.fence })
       return { status: "renewed", fence: this.fence }
-    } catch (error) {
+    } catch {
       try {
         this.db.exec("ROLLBACK")
       } catch {
         // Already rolled back.
       }
-      const reason = error instanceof Error ? error.message : String(error)
-      this.emit({ kind: "error", reason: "renew", detail: reason })
-      return { status: "error", reason }
+      this.emit({ kind: "error", code: "renew-failed" })
+      return { status: "error", code: "renew-failed" }
     }
   }
 
-  private revoke(reason: string): void {
+  private revoke(reason: RevokeReason): void {
     if (this.revoked) return
     this.revoked = true
     this.owned = false

@@ -1,16 +1,20 @@
 /**
  * TUI part for the M0 transmission spike. Wiring only: probes, ownership,
  * event observation, one fixed publication command and cleanup.
+ *
+ * SPIKE ORCHESTRATION: this file intentionally keeps the whole M0 harness in
+ * one place. M1 replaces it with the real reducer/session-election wiring; do
+ * not grow this into the production architecture.
  */
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/plugin"
 
-import { EvidenceLog, startCapture, type CaptureController } from "./m0/capture.js"
-import { classifyLocality, currentSession, inspectSession, loadPseudonymSalt, probeRuntime, pseudonym, type SessionInspection } from "./m0/probe.js"
+import { EvidenceLog, errorRecord, startCapture, type CaptureController } from "./m0/capture.js"
+import { classifyLocality, currentSession, inspectSession, loadPseudonymSalt, probeRuntime, pseudonym, resolveSessionTimestamp, type SessionInspection } from "./m0/probe.js"
 import { Publisher, type Acquisition, type PublisherEvent } from "./m0/publisher.js"
 import { CLIENT_ID, buildActivity, validateActivity } from "./discord/presence.js"
 import { DiscordIpc } from "./discord/ipc.js"
@@ -61,8 +65,60 @@ function timestamp(): string {
   return new Date().toISOString()
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+export type PublicationAttempt =
+  | "ready"
+  | "socket-close"
+  | "socket-error"
+  | "command-publish"
+  | "disconnect-command"
+  | "disconnect"
+  | "revoked"
+  | "cleanup"
+  | "cleanup-close"
+  | "coordination-start"
+
+export type PublicationCode =
+  | "live-disabled"
+  | "no-coordinator"
+  | "no-observed-session"
+  | "session-unreadable"
+  | "executed-model-unknown"
+  | "timestamp-unavailable"
+  | "payload-invalid"
+  | "not-owner"
+  | "connect-failed"
+  | "enqueue-busy"
+  | "enqueue-not-owner"
+  | "enqueue-revoked"
+  | "enqueue-no-store"
+  | "enqueue-error"
+  | "rpc-rejected"
+  | "rpc-timeout"
+  | "rpc-closed"
+  | "clear-refused"
+  | "no-socket"
+  | "socket-closed"
+  | "socket-error"
+  | "publisher-revoked"
+  | "cleanup"
+
+export interface TimestampProvenance {
+  seconds: number
+  sourceField: string
+  originalValue: number
+  originalUnits: "milliseconds since Unix epoch"
+  conversion: "floor(ms/1000)"
+  committed: boolean
+  anchorCommitted: boolean
+}
+
+interface ModelProvenance {
+  selected: unknown
+  executed: unknown
+  agent: string | null
+  sessionCost: number | null
+  reportedCost: number | null
+  tokens: unknown
 }
 
 interface PublicationRecord {
@@ -70,23 +126,35 @@ interface PublicationRecord {
   at: string
   instanceId: string
   pid: number
-  attempt: string
+  attempt: PublicationAttempt
   live: boolean
   sessionHash?: string
-  selector?: string
+  selector?: "route" | "event"
   fence?: number
   ready?: boolean
-  socketPath?: string
   nonce?: string
-  cmd?: string
-  evt?: string
+  cmd?: "SET_ACTIVITY"
+  evt?: "ERROR" | null
   activity?: unknown
   rpcOk?: boolean
-  rpcError?: string
   durationMs?: number
-  refused?: string
-  timestampProvenance?: unknown
-  modelProvenance?: unknown
+  code?: PublicationCode
+  timestampProvenance?: TimestampProvenance | { refusal: "timestamp-unavailable" }
+  modelProvenance?: ModelProvenance
+}
+
+function sessionAnchorKey(classification: { class: string; serverFingerprint: string | null }, sessionID: string): string {
+  return createHash("sha256").update(classification.class).update("\u0000").update(classification.serverFingerprint ?? "unknown").update("\u0000").update(sessionID).digest("hex")
+}
+
+function errorCode(error: unknown): PublicationCode {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code
+    if (code === "ETIMEDOUT") return "rpc-timeout"
+    if (code === "ECLOSED") return "rpc-closed"
+    if (code === "ERPC") return "rpc-rejected"
+  }
+  return "connect-failed"
 }
 
 export default Plugin.define({
@@ -130,8 +198,8 @@ export default Plugin.define({
       sqlite: runtimeProbe.sqlite,
       imports: runtimeProbe.imports,
       locality,
-      options: { capture: options.capture, live: options.live, captureReference: options.captureReference, runtimeDir: options.runtimeDir },
-      socketPath: discordSocketPath(),
+      options: { capture: options.capture, live: options.live, captureReference: options.captureReference },
+      discordSocket: process.env.DISCORD_IPC_PATH ? "env" : "default",
     })
 
     let ipc: DiscordIpc | null = null
@@ -151,7 +219,7 @@ export default Plugin.define({
         backend,
         identity: { instanceId, pid: process.pid, generation },
         onEvent: publisherLog,
-        onRevoked: (reason) => {
+        onRevoked: () => {
           log.append("publication.jsonl", {
             v: 1,
             at: timestamp(),
@@ -159,17 +227,17 @@ export default Plugin.define({
             pid: process.pid,
             attempt: "revoked",
             live: options.live,
-            refused: `publisher lease revoked: ${reason}`,
+            code: "publisher-revoked",
           })
           if (ipc) {
-            ipc.destroy(`publisher lease revoked: ${reason}`)
+            ipc.destroy("publisher lease revoked")
             ipc = null
           }
         },
       })
       try {
         acquisition = publisher.start()
-      } catch (error) {
+      } catch {
         log.append("publication.jsonl", {
           v: 1,
           at: timestamp(),
@@ -177,12 +245,12 @@ export default Plugin.define({
           pid: process.pid,
           attempt: "coordination-start",
           live: options.live,
-          refused: errorText(error),
+          code: "no-coordinator",
         })
       }
     }
 
-    const closeIpc = (reason: string, attempt = "disconnect"): void => {
+    const closeIpc = (code: PublicationCode, attempt: PublicationAttempt = "cleanup-close"): void => {
       if (!ipc) return
       ipc.close()
       ipc = null
@@ -193,7 +261,7 @@ export default Plugin.define({
         pid: process.pid,
         attempt,
         live: options.live,
-        refused: reason,
+        code,
       })
     }
 
@@ -203,7 +271,7 @@ export default Plugin.define({
       const connection = new DiscordIpc({
         path: socketPath,
         clientId: CLIENT_ID,
-        onClose: (reason) => {
+        onClose: () => {
           log.append("publication.jsonl", {
             v: 1,
             at: timestamp(),
@@ -211,11 +279,10 @@ export default Plugin.define({
             pid: process.pid,
             attempt: "socket-close",
             live: options.live,
-            socketPath,
-            refused: reason,
+            code: "socket-closed",
           })
         },
-        onError: (error) => {
+        onError: () => {
           log.append("publication.jsonl", {
             v: 1,
             at: timestamp(),
@@ -223,8 +290,7 @@ export default Plugin.define({
             pid: process.pid,
             attempt: "socket-error",
             live: options.live,
-            socketPath,
-            rpcError: errorText(error),
+            code: "socket-error",
           })
         },
       })
@@ -237,7 +303,6 @@ export default Plugin.define({
         pid: process.pid,
         attempt: "ready",
         live: options.live,
-        socketPath,
         ready: true,
       })
       return connection
@@ -246,8 +311,10 @@ export default Plugin.define({
     const snapshot = async (kind: string): Promise<Record<string, unknown>> => {
       const observed = currentSession(context, lastSessionID)
       let inspection: SessionInspection | null = null
+      let anchor = null
       if (observed) {
         inspection = await inspectSession(context, observed.sessionID, salt)
+        if (publisher) anchor = publisher.readAnchor(sessionAnchorKey(locality, observed.sessionID))
       }
       const document = {
         v: 1,
@@ -259,18 +326,19 @@ export default Plugin.define({
         generation: publisher?.identity.generation ?? null,
         selector: observed ? { reason: observed.reason, sessionHash: pseudonym(salt, observed.sessionID) } : null,
         inspection,
+        anchor,
         ownership: publisher
           ? { isOwner: publisher.isOwner, fence: publisher.currentFence, revoked: publisher.isRevoked, ownerRow: publisher.ownerSnapshot() }
           : null,
         acquisition,
         locality,
-        probe: { host: runtimeProbe.host, imports: runtimeProbe.imports, sqlite: runtimeProbe.sqlite },
+        probe: { observedAt: runtimeProbe.observedAt, host: runtimeProbe.host, imports: runtimeProbe.imports, sqlite: runtimeProbe.sqlite },
         captureEnabled: options.capture,
         live: options.live,
       }
       await writeJson(`snapshot-${instanceId}.json`, document)
       await writeJson("snapshot.json", document)
-      log.append(`publisher-${instanceId}.jsonl`, { v: 1, kind: "snapshot", atMs: Date.now(), instanceId, pid: process.pid, detail: kind })
+      log.append(`publisher-${instanceId}.jsonl`, { v: 1, kind: "snapshot", atMs: Date.now(), instanceId, pid: process.pid, generation, snapshotKind: kind })
       return document
     }
 
@@ -282,40 +350,49 @@ export default Plugin.define({
       }
     }
 
-    const publish = async (attempt: string): Promise<void> => {
+    const publish = async (attempt: PublicationAttempt): Promise<void> => {
       const started = Date.now()
       const base: PublicationRecord = { v: 1, at: timestamp(), instanceId, pid: process.pid, attempt, live: options.live }
       if (!options.live) {
-        publishRecord({ ...base, refused: "live publication is not enabled (m0.live=false)" })
+        publishRecord({ ...base, code: "live-disabled" })
         toast("Refused: live publication is off")
         return
       }
       if (!publisher) {
-        publishRecord({ ...base, refused: "coordination store unavailable; no owner can be verified" })
+        publishRecord({ ...base, code: "no-coordinator" })
         toast("Refused: coordination store unavailable")
         return
       }
       const observed = currentSession(context, lastSessionID)
       if (!observed || observed.reason === "most-recent") {
-        publishRecord({ ...base, refused: "no session observed from route or events" })
+        publishRecord({ ...base, code: "no-observed-session" })
         toast("Refused: no observed session")
         return
       }
 
       const inspection = await inspectSession(context, observed.sessionID, salt)
+      const sessionKey = sessionAnchorKey(locality, observed.sessionID)
+      const anchor = publisher.readAnchor(sessionKey)
+      const selectedTimestamp = resolveSessionTimestamp(anchor, inspection.latestUserMessageAtMs)
+      const provenance: TimestampProvenance | { refusal: "timestamp-unavailable" } =
+        "code" in selectedTimestamp
+          ? { refusal: "timestamp-unavailable" }
+          : {
+              seconds: selectedTimestamp.seconds,
+              sourceField: "session.message.list[].type=user.time.created",
+              originalValue: selectedTimestamp.sourceCreatedMs,
+              originalUnits: "milliseconds since Unix epoch",
+              conversion: "floor(ms/1000)",
+              committed: selectedTimestamp.committed,
+              anchorCommitted: false,
+            }
+
       const baseWithSession: PublicationRecord = {
         ...base,
         sessionHash: inspection.sessionIDHash ?? undefined,
         selector: observed.reason,
         fence: publisher.currentFence,
-        timestampProvenance:
-          inspection.frozenTimestampSeconds !== null
-            ? {
-                seconds: inspection.frozenTimestampSeconds,
-                sourceField: inspection.frozenTimestampSource,
-                originalUnits: inspection.timestampOriginalUnits,
-              }
-            : { refusal: inspection.timestampRefusal },
+        timestampProvenance: provenance,
         modelProvenance: {
           selected: inspection.selectedModel,
           executed: inspection.executedModel,
@@ -327,28 +404,27 @@ export default Plugin.define({
       }
 
       if (!inspection.found) {
-        publishRecord({ ...baseWithSession, refused: "session inspection failed" })
+        publishRecord({ ...baseWithSession, code: "session-unreadable" })
         toast("Refused: session not readable")
         return
       }
       if (!inspection.executedModel) {
-        publishRecord({ ...baseWithSession, refused: "executed model is not observable; small_text cannot be honest" })
+        publishRecord({ ...baseWithSession, code: "executed-model-unknown" })
         toast("Refused: executed model unknown")
         return
       }
-      if (inspection.frozenTimestampSeconds === null) {
-        publishRecord({ ...baseWithSession, refused: inspection.timestampRefusal ?? "session timestamp unavailable" })
+      if ("code" in selectedTimestamp) {
+        publishRecord({ ...baseWithSession, code: "timestamp-unavailable" })
         toast("Refused: no session-anchored timestamp")
         return
       }
+      const seconds = selectedTimestamp.seconds
+      const sourceMs = selectedTimestamp.sourceCreatedMs
 
-      const activity = buildActivity(
-        { id: inspection.executedModel.id, providerID: inspection.executedModel.providerID },
-        inspection.frozenTimestampSeconds,
-      )
+      const activity = buildActivity({ id: inspection.executedModel.id, providerID: inspection.executedModel.providerID }, seconds)
       const validation = validateActivity(activity)
       if (!validation.ok) {
-        publishRecord({ ...baseWithSession, activity, refused: `payload validation failed: ${validation.problems.join("; ")}` })
+        publishRecord({ ...baseWithSession, activity, code: "payload-invalid" })
         toast("Refused: payload validation failed")
         return
       }
@@ -359,7 +435,7 @@ export default Plugin.define({
         else publisher.tick()
       }
       if (!publisher.isOwner) {
-        publishRecord({ ...baseWithSession, activity, refused: "this instance does not hold the publisher lease" })
+        publishRecord({ ...baseWithSession, activity, code: "not-owner" })
         toast("Refused: another instance owns the card")
         return
       }
@@ -367,8 +443,8 @@ export default Plugin.define({
       let connection: DiscordIpc
       try {
         connection = await connectIpc()
-      } catch (error) {
-        publishRecord({ ...baseWithSession, activity, refused: `Discord connection failed: ${errorText(error)}` })
+      } catch {
+        publishRecord({ ...baseWithSession, activity, code: "connect-failed" })
         toast("Discord is not reachable")
         return
       }
@@ -377,13 +453,18 @@ export default Plugin.define({
       // in the same IMMEDIATE transaction as the synchronous socket write.
       const critical = publisher.criticalEnqueue(() => connection.enqueueSetActivity(process.pid, activity as unknown as Record<string, unknown>))
       if (!critical.ok) {
-        publishRecord({
-          ...baseWithSession,
-          activity,
-          refused: `fenced enqueue rejected: ${critical.reason}${critical.error ? ` (${critical.error})` : ""}`,
-          durationMs: Date.now() - started,
-        })
-        toast(`Refused: ${critical.reason}`)
+        const code: PublicationCode =
+          critical.reason === "busy"
+            ? "enqueue-busy"
+            : critical.reason === "not-owner"
+              ? "enqueue-not-owner"
+              : critical.reason === "revoked"
+                ? "enqueue-revoked"
+                : critical.reason === "no-store"
+                  ? "enqueue-no-store"
+                  : "enqueue-error"
+        publishRecord({ ...baseWithSession, activity, code, durationMs: Date.now() - started })
+        toast("Refused: fenced enqueue rejected")
         return
       }
 
@@ -395,16 +476,21 @@ export default Plugin.define({
       try {
         const reply = await request.reply
         const ok = reply.evt !== "ERROR"
+        let anchorCommitted = false
+        if (ok) {
+          anchorCommitted = publisher.commitAnchor(sessionKey, seconds, sourceMs)
+        }
         publishRecord({
           ...baseWithSession,
           at: enqueuedAt,
           fence: critical.fence,
           activity,
           nonce: request.nonce,
-          cmd: reply.cmd ?? "SET_ACTIVITY",
-          evt: reply.evt ?? undefined,
+          cmd: "SET_ACTIVITY",
+          evt: ok ? null : "ERROR",
           rpcOk: ok,
-          ...(ok ? {} : { rpcError: JSON.stringify(reply.data ?? null) }),
+          ...(ok ? {} : { code: "rpc-rejected" as const }),
+          timestampProvenance: { ...provenance, anchorCommitted },
           durationMs: Date.now() - started,
         })
         toast(ok ? "Presence sent (RPC acknowledged)" : "Discord rejected the presence update")
@@ -416,7 +502,7 @@ export default Plugin.define({
           activity,
           nonce: request.nonce,
           rpcOk: false,
-          rpcError: errorText(error),
+          code: errorCode(error),
           durationMs: Date.now() - started,
         })
         toast("No RPC acknowledgment")
@@ -431,29 +517,19 @@ export default Plugin.define({
         if (critical.ok) {
           try {
             const reply = await critical.value.reply
-            publishRecord({ ...attempt, fence: critical.fence, nonce: critical.value.nonce, cmd: reply.cmd, evt: reply.evt ?? undefined, rpcOk: reply.evt !== "ERROR" })
+            const ok = reply.evt !== "ERROR"
+            publishRecord({ ...attempt, fence: critical.fence, nonce: critical.value.nonce, cmd: "SET_ACTIVITY", evt: ok ? null : "ERROR", rpcOk: ok, ...(ok ? {} : { code: "rpc-rejected" as const }) })
           } catch (error) {
-            publishRecord({ ...attempt, fence: critical.fence, nonce: critical.value.nonce, rpcOk: false, rpcError: errorText(error) })
+            publishRecord({ ...attempt, fence: critical.fence, nonce: critical.value.nonce, rpcOk: false, code: errorCode(error) })
           }
         } else {
-          publishRecord({ ...attempt, refused: `clear rejected: ${critical.reason}` })
+          publishRecord({ ...attempt, code: "clear-refused" })
         }
       } else {
-        publishRecord({ ...attempt, refused: options.live ? "no ready socket or no lease; nothing to clear" : "live publication off; nothing to clear" })
+        publishRecord({ ...attempt, code: options.live ? "no-socket" : "live-disabled" })
       }
-      closeIpc("disconnect command")
-      if (publisher) {
-        const released = publisher.release()
-        publisherLog({
-          kind: "release",
-          atMs: Date.now(),
-          instanceId: publisher.identity.instanceId,
-          pid: process.pid,
-          generation: publisher.identity.generation,
-          fence: publisher.currentFence,
-          detail: released ? "released by command" : "not owner at disconnect",
-        })
-      }
+      closeIpc("no-socket", "disconnect")
+      if (publisher) publisher.release()
       toast("Disconnected")
     }
 
@@ -521,7 +597,7 @@ export default Plugin.define({
         ],
       }))
     } catch (error) {
-      log.append("capture.jsonl", { v: 1, seq: 0, atMs: Date.now(), source: "listen", type: "command.registration.failed", detail: errorText(error) })
+      log.append("capture.jsonl", errorRecord("command.registration.failed", "capture-invalid", instanceId))
     }
 
     const unsubscribe = context.data.listen(({ details }) => {
@@ -531,7 +607,7 @@ export default Plugin.define({
         if (typeof data.sessionID === "string") lastSessionID = data.sessionID
         capture?.onListen(event)
       } catch (error) {
-        capture?.notify("capture.listen.error", errorText(error))
+        capture?.notify("capture.listen.error", "capture-listen-failed")
       }
     })
 
@@ -539,14 +615,14 @@ export default Plugin.define({
       try {
         capture = startCapture(log, { salt, reference: options.captureReference, context, instanceId })
       } catch (error) {
-        log.append("capture.jsonl", { v: 1, seq: 0, atMs: Date.now(), source: "listen", type: "capture.start.failed", detail: errorText(error) })
+        log.append("capture.jsonl", errorRecord("capture.start.failed", "capture-start-failed", instanceId))
       }
     }
 
     try {
       await snapshot("startup-mid-task")
     } catch (error) {
-      log.append("capture.jsonl", { v: 1, seq: 0, atMs: Date.now(), source: "listen", type: "snapshot.startup.failed", detail: errorText(error) })
+      log.append("capture.jsonl", errorRecord("snapshot.startup.failed", "snapshot-startup-failed", instanceId))
     }
 
     return async () => {
@@ -582,7 +658,7 @@ export default Plugin.define({
             pid: process.pid,
             generation: publisher.identity.generation,
             fence,
-            detail: "cleanup closes the socket and releases the lease without clearing the card",
+            reason: "cleanup",
           })
         }
         // Do not clear on reload: the previous milestone behaviour is a short

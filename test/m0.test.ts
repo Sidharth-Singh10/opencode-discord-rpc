@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { hostname } from "node:os"
 import { join } from "node:path"
 
 import type { Context } from "@opencode/plugin/tui/plugin"
 
-import { captureEvent } from "../src/m0/capture.js"
-import { classifyLocality, loadPseudonymSalt, loadSqliteBackend, pseudonym, resetFrozenTimestamps, timestampForSession } from "../src/m0/probe.js"
+import { captureEvent, errorRecord, validateCaptureRecord } from "../src/m0/capture.js"
+import { classifyLocality, loadPseudonymSalt, loadSqliteBackend, pseudonym, resolveSessionTimestamp, toUnixSeconds } from "../src/m0/probe.js"
 import { Publisher } from "../src/m0/publisher.js"
 import { buildActivity, validateActivity } from "../src/discord/presence.js"
 import { DiscordIpc, FrameDecoder, OPCODE, encodeFrame } from "../src/discord/ipc.js"
@@ -34,7 +35,6 @@ afterEach(async () => {
   closers.length = 0
   for (const dir of tempDirs.reverse()) rmSync(dir, { recursive: true, force: true })
   tempDirs.length = 0
-  resetFrozenTimestamps()
 })
 
 function fakeContext(info: () => Promise<{ version: string; pid: number; hostname?: string; urls: string[] }>): Context {
@@ -81,30 +81,27 @@ describe("presence payload", () => {
   })
 })
 
-describe("session timestamp provenance", () => {
-  test("converts milliseconds to integer seconds and freezes per session", () => {
-    expect(timestampForSession("ses_1", 1_750_000_000_123, "session.message.list[].type=user.time.created")).toEqual({
-      seconds: 1_750_000_000,
-      source: "session.message.list[].type=user.time.created",
-      originalMs: 1_750_000_000_123,
-    })
-    const frozen = timestampForSession("ses_1", 1_760_000_000_000, "different.source")
-    expect(frozen).toEqual({
-      seconds: 1_750_000_000,
-      source: "session.message.list[].type=user.time.created",
-      originalMs: 1_750_000_000_123,
-    })
+describe("timestamp lifecycle helpers", () => {
+  test("converts milliseconds to floor seconds", () => {
+    expect(toUnixSeconds(1_750_000_000_123)).toEqual({ seconds: 1_750_000_000 })
   })
 
-  test("never substitutes another clock when no user message exists", () => {
-    const result = timestampForSession("ses_2", null, null)
-    expect("error" in result).toBe(true)
+  test("reports explicit failure codes instead of fabricating a time", () => {
+    expect(toUnixSeconds(null)).toEqual({ code: "timestamp-missing" })
+    expect(toUnixSeconds(Number.NaN)).toEqual({ code: "timestamp-invalid" })
+    expect(toUnixSeconds(-1)).toEqual({ code: "timestamp-invalid" })
+    expect(toUnixSeconds(Date.now() + 3_600_000)).toEqual({ code: "timestamp-future" })
   })
 
-  test("rejects nonsensical and future timestamps", () => {
-    expect("error" in timestampForSession("ses_3", Number.NaN, "x")).toBe(true)
-    expect("error" in timestampForSession("ses_4", -1, "x")).toBe(true)
-    expect("error" in timestampForSession("ses_5", Date.now() + 3_600_000, "x")).toBe(true)
+  test("an existing anchor survives later user messages and reports committed", () => {
+    const first = resolveSessionTimestamp(null, 1_750_000_000_123)
+    expect(first).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123, committed: false })
+    const anchor = { seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123 }
+    expect(resolveSessionTimestamp(anchor, 1_760_000_000_999)).toEqual({
+      seconds: 1_750_000_000,
+      sourceCreatedMs: 1_750_000_000_123,
+      committed: true,
+    })
   })
 })
 
@@ -120,30 +117,45 @@ describe("pseudonym salt", () => {
 })
 
 describe("locality classification", () => {
-  test("classifies loopback as local and allows enrichment", async () => {
-    const result = await classifyLocality(
-      fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: "localhost", urls: ["http://127.0.0.1:43173"] })),
-    )
+  const localName = hostname()
+
+  test("classifies a complete loopback identity as local", async () => {
+    const result = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: ["http://127.0.0.1:43173"] })))
     expect(result.class).toBe("local")
     expect(result.enrichment).toBe("allowed")
+    expect(result.serverFingerprint).toMatch(/^[0-9a-f]{16}$/)
+    expect(JSON.stringify(result)).not.toContain(localName)
+    expect(JSON.stringify(result)).not.toContain("127.0.0.1")
   })
 
   test("classifies a foreign host as remote and refuses enrichment", async () => {
-    const result = await classifyLocality(
-      fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: "some-remote-host", urls: ["https://some-remote-host.example"] })),
-    )
+    const result = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: "some-remote-host", urls: ["https://some-remote-host.example"] })))
     expect(result.class).toBe("remote")
     expect(result.enrichment).toBe("refused")
+    expect(result.reason).toBe("host-mismatch")
+    expect(JSON.stringify(result)).not.toContain("some-remote-host")
   })
 
-  test("unknown identity refuses enrichment", async () => {
-    const result = await classifyLocality(
-      fakeContext(async () => {
-        throw new Error("server.info unavailable")
-      }),
-    )
+  test("absent or empty identity is unknown, never local", async () => {
+    const missing = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, urls: ["http://127.0.0.1:43173"] })))
+    const emptyURLs = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: [] })))
+    const emptyBoth = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, urls: [] })))
+    const malformed = await classifyLocality(fakeContext(async () => ({ version: "2.3.0", pid: 1, hostname: localName, urls: ["not a url"] })))
+    for (const result of [missing, emptyURLs, emptyBoth, malformed]) {
+      expect(result.class).toBe("unknown")
+      expect(result.enrichment).toBe("refused")
+      expect(result.serverFingerprint).toBeNull()
+    }
+  })
+
+  test("an unavailable server.info is unknown and refuses enrichment", async () => {
+    const result = await classifyLocality(fakeContext(async () => { throw new Error("secret url https://user:pass@example.test/private") }))
     expect(result.class).toBe("unknown")
     expect(result.enrichment).toBe("refused")
+    expect(result.reason).toBe("server-info-unavailable")
+    expect(JSON.stringify(result)).not.toContain("secret")
+    expect(JSON.stringify(result)).not.toContain("example.test")
+    expect(JSON.stringify(result)).not.toContain("private")
   })
 })
 
@@ -161,22 +173,12 @@ describe("capture allowlist", () => {
     "M0CANARY_META_jjjj",
     "M0CANARY_CRED_kkkk",
     "M0CANARY_URL_llll",
+    "M0CANARY_UNHANDLED_SECRET",
   ]
 
   const events: unknown[] = [
-    {
-      id: "evt_text",
-      type: "session.text.delta",
-      created: 1_750_000_000_000,
-      location: { directory: "/home/levi/M0CANARY_PATH_hhhh" },
-      data: { sessionID: "ses_1", assistantMessageID: "msg_1", text: "M0CANARY_PROMPT_aaaa" },
-    },
-    {
-      id: "evt_reasoning",
-      type: "session.reasoning.delta",
-      created: 1_750_000_000_000,
-      data: { sessionID: "ses_1", assistantMessageID: "msg_1", text: "M0CANARY_REASONING_bbbb" },
-    },
+    { id: "evt_text", type: "session.text.delta", created: 1_750_000_000_000, location: { directory: "/home/levi/M0CANARY_PATH_hhhh" }, data: { sessionID: "ses_1", assistantMessageID: "msg_1", text: "M0CANARY_PROMPT_aaaa" } },
+    { id: "evt_reasoning", type: "session.reasoning.delta", created: 1_750_000_000_000, data: { sessionID: "ses_1", assistantMessageID: "msg_1", text: "M0CANARY_REASONING_bbbb" } },
     {
       id: "evt_tool",
       type: "session.tool.failed",
@@ -192,71 +194,56 @@ describe("capture allowlist", () => {
         metadata: { title: "M0CANARY_TITLE_iiii", prompt: "M0CANARY_META_jjjj" },
       },
     },
-    {
-      id: "evt_perm",
-      type: "permission.asked",
-      created: 1_750_000_000_000,
-      data: {
-        id: "perm_1",
-        sessionID: "ses_1",
-        action: "bash",
-        resources: ["/home/levi/M0CANARY_PERM_eeee"],
-        message: "M0CANARY_PERM_eeee",
-        metadata: { command: "M0CANARY_META_jjjj" },
-      },
-    },
-    {
-      id: "evt_form",
-      type: "form.created",
-      created: 1_750_000_000_000,
-      data: {
-        form: {
-          id: "form_1",
-          sessionID: "ses_1",
-          title: "M0CANARY_FORM_ffff",
-          metadata: { title: "M0CANARY_TITLE_iiii" },
-          fields: [{ id: "field", title: "M0CANARY_FORM_ffff", value: "M0CANARY_META_jjjj" }],
-        },
-      },
-    },
-    {
-      id: "evt_status",
-      type: "session.status",
-      created: 1_750_000_000_000,
-      data: { sessionID: "ses_1", status: { type: "retry", attempt: 2, message: "M0CANARY_ERROR_gggg" } },
-    },
-    {
-      id: "evt_interrupt",
-      type: "session.execution.interrupted",
-      created: 1_750_000_000_000,
-      data: { sessionID: "ses_1", reason: "user" },
-    },
+    { id: "evt_perm", type: "permission.asked", created: 1_750_000_000_000, data: { id: "perm_1", sessionID: "ses_1", action: "bash", resources: ["/home/levi/M0CANARY_PERM_eeee"], message: "M0CANARY_PERM_eeee", metadata: { command: "M0CANARY_META_jjjj" } } },
+    { id: "evt_form", type: "form.created", created: 1_750_000_000_000, data: { form: { id: "form_1", sessionID: "ses_1", title: "M0CANARY_FORM_ffff", metadata: { title: "M0CANARY_TITLE_iiii" }, fields: [{ id: "field", title: "M0CANARY_FORM_ffff", value: "M0CANARY_META_jjjj" }] } } },
+    { id: "evt_status", type: "session.status", created: 1_750_000_000_000, data: { sessionID: "ses_1", status: { type: "retry", attempt: 2, message: "M0CANARY_ERROR_gggg" } } },
+    { id: "evt_interrupt", type: "session.execution.interrupted", created: 1_750_000_000_000, data: { sessionID: "ses_1", reason: "user" } },
+    { id: "evt_unknown", type: "session.unknown.event", created: 1_750_000_000_000, data: { sessionID: "ses_1", credentials: { M0CANARY_UNHANDLED_SECRET: "M0CANARY_UNHANDLED_SECRET" }, nested: { arbitrary: "M0CANARY_UNHANDLED_SECRET" } } },
   ]
 
   test("never serializes prompts, deltas, tool data, paths, forms, errors or credentials", () => {
-    const serialized = events
-      .map((event, index) => JSON.stringify(captureEvent(event, "listen", index, "salt")))
-      .join("\n")
+    const serialized = events.map((event, index) => JSON.stringify(captureEvent(event, "listen", index, "salt", Date.now(), "inst"))).join("\n")
     for (const canary of canaries) expect(serialized).not.toContain(canary)
     expect(serialized).not.toContain("M0CANARY")
     expect(serialized).not.toContain("/home/levi")
     expect(serialized).not.toContain("example.test")
   })
 
-  test("keeps allowlisted status/outcome/attempt values and structural paths", () => {
-    const status = captureEvent(events[5], "listen", 1, "salt")
-    expect(status?.type).toBe("session.status")
+  test("unhandled data keys are not traversed at all", () => {
+    const captured = captureEvent(events[7], "listen", 1, "salt", Date.now(), "inst")
+    expect(captured).not.toBeNull()
+    expect(captured?.fields.some(([path]) => path.includes("credentials"))).toBe(false)
+    expect(captured?.fields.some(([path]) => path.includes("nested"))).toBe(false)
+    expect(JSON.stringify(captured)).not.toContain("M0CANARY")
+  })
+
+  test("keeps allowlisted values and fixed structural paths", () => {
+    const status = captureEvent(events[5], "listen", 1, "salt", Date.now(), "inst")
     expect(status?.values).toEqual({ status: "retry", attempt: 2 })
     expect(status?.fields.some(([path]) => path === "data.status.type")).toBe(true)
-
-    const interrupted = captureEvent(events[6], "listen", 2, "salt")
+    const interrupted = captureEvent(events[6], "listen", 2, "salt", Date.now(), "inst")
     expect(interrupted?.values).toEqual({ reason: "user" })
-
-    const tool = captureEvent(events[2], "listen", 3, "salt")
+    const tool = captureEvent(events[2], "listen", 3, "salt", Date.now(), "inst")
     expect(tool?.values).toEqual({ executed: true })
-    expect(tool?.fields.some(([path]) => path === "data.input")).toBe(true)
-    expect(tool?.fields.some(([path]) => path.startsWith("data.input."))).toBe(false)
-    expect(tool?.fields.some(([path]) => path.startsWith("data.error."))).toBe(false)
+    expect(tool?.fields.some(([path]) => path === "data.sessionID")).toBe(true)
+    expect(tool?.fields.some(([path]) => path.startsWith("data.input"))).toBe(false)
+    expect(tool?.fields.some(([path]) => path.startsWith("data.error"))).toBe(false)
+    expect(validateCaptureRecord(status)).toBe(true)
+  })
+
+  test("runtime validation rejects extra keys and out-of-schema values", () => {
+    const base = captureEvent(events[5], "listen", 1, "salt", Date.now(), "inst")
+    expect(base).not.toBeNull()
+    expect(validateCaptureRecord({ ...base, injected: "x" })).toBe(false)
+    expect(validateCaptureRecord({ ...base, values: { arbitrary: "M0CANARY" } })).toBe(false)
+    expect(validateCaptureRecord({ ...base, fields: [["data.credentials", "object"]] })).toBe(false)
+  })
+
+  test("error records carry a fixed code and no exception text", () => {
+    const record = errorRecord("observer.error", "capture-listen-failed", "inst", "subscribe")
+    expect(record).toEqual({ v: 1, seq: 0, atMs: record.atMs, source: "subscribe", instanceId: "inst", type: "observer.error", code: "capture-listen-failed" })
+    expect(JSON.stringify(record)).not.toContain("https://")
+    expect(validateCaptureRecord(record)).toBe(true)
   })
 })
 
@@ -325,6 +312,22 @@ describe("discord ipc framing", () => {
     const request = ipc.enqueueSetActivity(process.pid, { details: "x" })
     await expect(request.reply).rejects.toThrow()
     expect(() => ipc.enqueueSetActivity(process.pid, { details: "y" })).toThrow()
+    expect(ipc.pendingRpcCount).toBe(0)
+  })
+
+  test("close during the handshake settles the pending connect", async () => {
+    const dir = tempDir("ipc-close-handshake")
+    const path = join(dir, "discord-ipc-0")
+    const fake = new FakeDiscord({ path, noReady: true })
+    await fake.start()
+    closers.push(() => fake.stop())
+    const ipc = new DiscordIpc({ path, clientId: "1572459187873783838", connectTimeoutMs: 1000 })
+    closers.push(() => ipc.close())
+    const started = Date.now()
+    const connecting = ipc.connect()
+    setTimeout(() => ipc.close(), 30)
+    await expect(connecting).rejects.toThrow(/closed|READY/)
+    expect(Date.now() - started).toBeLessThan(300)
     expect(ipc.pendingRpcCount).toBe(0)
   })
 
@@ -407,6 +410,86 @@ describe("publisher owner and fence", () => {
     expect(acquired.status).toBe("acquired")
     if (acquired.status === "acquired") expect(acquired.fence).toBe(3)
     expect(first.resume()?.status).toBe("contended")
+  })
+
+  test("recovers automatically from a startup schema lock without an auxiliary tick", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-startup-lock")
+    const raw = backend.open(join(dir, "publisher.sqlite"))
+    raw.exec("BEGIN IMMEDIATE")
+    const publisher = new Publisher({ runtimeDir: dir, backend, tickMs: 100, heartbeatMs: 200, staleMs: 1000 })
+    closers.push(() => publisher.stop())
+
+    const first = publisher.start()
+    expect(first.status).toBe("error")
+
+    raw.exec("COMMIT")
+    raw.close()
+
+    // No publisher.tick() here: the production timer must recover.
+    const deadline = Date.now() + 4000
+    while (!publisher.isOwner && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(publisher.isOwner).toBe(true)
+    expect(publisher.currentFence).toBeGreaterThan(0)
+  })
+
+  test("commits an anchor once and preserves it across a second instance", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-anchor")
+    const key = "a".repeat(64)
+    const first = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => first.stop())
+    expect(first.start().status).toBe("acquired")
+    expect(first.readAnchor(key)).toBeNull()
+    expect(first.commitAnchor(key, 1_750_000_000, 1_750_000_000_123)).toBe(true)
+    expect(first.readAnchor(key)).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_123, committedMs: expect.any(Number) })
+
+    // A later commit must not move the first acknowledged anchor.
+    expect(first.commitAnchor(key, 1_760_000_000, 1_760_000_000_000)).toBe(true)
+    expect(first.readAnchor(key)?.seconds).toBe(1_750_000_000)
+
+    const second = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => second.stop())
+    const acquired = second.start()
+    expect(acquired.status).toBe("contended")
+    expect(second.readAnchor(key)?.seconds).toBe(1_750_000_000)
+    expect(second.commitAnchor("not-a-key", 1_750_000_000, 1_750_000_000_123)).toBe(false)
+  })
+
+  test("failed attempt does not commit; a later success freezes the latest message and survives reload/takeover", async () => {
+    const { backend } = await loadSqliteBackend()
+    if (!backend) return
+    const dir = tempDir("pub-anchor-lifecycle")
+    const key = "b".repeat(64)
+    const first = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => first.stop())
+    expect(first.start().status).toBe("acquired")
+
+    // Attempt 1 fails before acknowledgement: nothing is committed.
+    const attempt1 = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_000_100)
+    expect(attempt1).toEqual({ seconds: 1_750_000_000, sourceCreatedMs: 1_750_000_000_100, committed: false })
+    expect(first.readAnchor(key)).toBeNull()
+
+    // A later user message moves the candidate until the first success commits.
+    const attempt2 = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_010_900)
+    expect(attempt2).toEqual({ seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_900, committed: false })
+    expect(first.commitAnchor(key, 1_750_000_010, 1_750_000_010_900)).toBe(true)
+
+    // Later messages do not move a committed anchor.
+    const later = resolveSessionTimestamp(first.readAnchor(key), 1_750_000_999_000)
+    expect(later).toEqual({ seconds: 1_750_000_010, sourceCreatedMs: 1_750_000_010_900, committed: true })
+
+    // A reload/new generation and a taking-over instance read the same anchor.
+    const reloaded = new Publisher({ runtimeDir: dir, backend, tickMs: 10_000_000 })
+    closers.push(() => reloaded.stop())
+    expect(reloaded.start().status).toBe("contended")
+    expect(resolveSessionTimestamp(reloaded.readAnchor(key), 1_760_000_000_000)).toEqual({
+      seconds: 1_750_000_010,
+      sourceCreatedMs: 1_750_000_010_900,
+      committed: true,
+    })
   })
 
   test("takes over only after the stale window and moves the fence forward", async () => {

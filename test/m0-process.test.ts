@@ -208,42 +208,49 @@ describe("publisher process isolation", () => {
   )
 
   test(
-    "suspend inside the critical section delays takeover but preserves safety",
+    "a held write lock delays takeover even after the stale window, without a test hook",
     async () => {
       const { fake, socketPath } = await startFake()
-      const base = tempDir("m0-critical")
+      const base = tempDir("m0-lockdelay")
 
-      const a = await spawnChild(base, "a", socketPath, { M0_HOLD_CRITICAL_MS: "6000" })
+      const a = await spawnChild(base, "a", socketPath)
       const acquiredA = await waitEvent(a, (event) => event.kind === "start" && event.status === "acquired")
 
-      writeFileSync(a.actionFile, "hold")
-      const deadline = Date.now() + 10_000
-      while (!existsSync(a.criticalFile) && Date.now() < deadline) await sleep(20)
-      expect(existsSync(a.criticalFile)).toBe(true)
+      const lockedFile = join(base, "locked")
+      const releaseFile = join(base, "release")
+      const locker = await spawnChild(base, "locker", socketPath, {
+        M0_MODE: "locker",
+        M0_LOCKED_FILE: lockedFile,
+        M0_RELEASE_FILE: releaseFile,
+        M0_RUNTIME: join(base, "runtime"),
+      })
+      await waitEvent(locker, (event) => event.kind === "locked", 10_000)
 
       kill(a, "SIGSTOP")
       const b = await spawnChild(base, "b", socketPath)
-      await waitEvent(b, (event) => event.kind === "start")
+      const startedB = await waitEvent(b, (event) => event.kind === "start", 10_000)
+      expect(["contended", "error"]).toContain(startedB.status ?? "")
 
-      // Well past the 10 s stale window: the held transaction blocks takeover.
+      // Well past the 10 s stale window: the external write lock blocks takeover.
       await sleep(12_000)
-      expect(readEvents(b).some((event) => event.kind === "publisher" && (event.event === "takeover" || event.event === "acquire") || event.kind === "start" && event.status === "takeover")).toBe(false)
-
-      kill(a, "SIGCONT")
-      const completed = await waitEvent(a, (event) => event.kind === "critical-result" && event.action === "hold", 10_000)
-      expect(completed.ok).toBe(true)
-
-      // A held the lock throughout and is still the owner; B never took over.
       expect(readEvents(b).some((event) => event.kind === "publisher" && event.event === "takeover")).toBe(false)
 
-      kill(a, "SIGKILL")
+      writeFileSync(releaseFile, "release")
+      await waitEvent(locker, (event) => event.kind === "unlocked", 10_000)
       const takeover = await waitEvent(b, (event) => event.kind === "publisher" && event.event === "takeover", 20_000)
       expect(takeover.fence).toBeGreaterThan(acquiredA.fence ?? 0)
 
-      const framesBefore = fake.activityFrames().length
+      kill(a, "SIGCONT")
+      await waitEvent(a, (event) => event.kind === "revoked", 10_000)
+      writeFileSync(a.actionFile, "clear")
+      const rejected = await waitEvent(a, (event) => event.kind === "critical-result" && event.action === "clear", 10_000)
+      expect(rejected.ok).toBe(false)
+
       writeFileSync(b.actionFile, "publish")
       await waitEvent(b, (event) => event.kind === "rpc-reply" && event.action === "publish", 10_000)
-      expect(fake.activityFrames().length).toBe(framesBefore + 1)
+      const frames = fake.activityFrames()
+      expect(frames).toHaveLength(1)
+      expect((frames[0]?.payload as { args: { pid: number } }).args.pid).toBe(b.proc.pid)
     },
     90_000,
   )

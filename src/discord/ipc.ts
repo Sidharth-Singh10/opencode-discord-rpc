@@ -225,7 +225,9 @@ export class DiscordIpc {
     if (this.closed) return
     this.closed = true
     this.ready = false
-    this.failPending(new DiscordIpcError("Discord IPC closed locally", "ECLOSED"))
+    const error = new DiscordIpcError("Discord IPC closed locally", "ECLOSED")
+    this.settleReady(error)
+    this.failPending(error)
     const socket = this.socket
     this.socket = null
     if (socket) {
@@ -239,7 +241,9 @@ export class DiscordIpc {
     if (this.closed) return
     this.closed = true
     this.ready = false
-    this.failPending(new DiscordIpcError(reason, "ECLOSED"))
+    const error = new DiscordIpcError(reason, "ECLOSED")
+    this.settleReady(error)
+    this.failPending(error)
     const socket = this.socket
     this.socket = null
     socket?.destroy()
@@ -329,11 +333,17 @@ export class DiscordIpc {
     }
   }
 
+  private settleReady(error: Error): void {
+    const reject = this.readyReject
+    this.readyReject = null
+    this.readyResolve = null
+    reject?.(error)
+  }
+
   private fail(error: Error): void {
     if (this.closed) return
     this.ready = false
-    this.readyReject?.(error)
-    this.readyReject = null
+    this.settleReady(error)
     this.options.onError?.(error)
     this.failPending(error)
     this.closeReason = this.closeReason ?? error.message

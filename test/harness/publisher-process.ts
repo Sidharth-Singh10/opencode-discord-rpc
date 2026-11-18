@@ -1,11 +1,15 @@
 /**
  * Real subprocess harness for publisher contention tests.
  *
- * It owns a coordination lease, one Discord IPC connection (fake endpoint)
- * and executes actions written by the parent test:
- *   publish | clear | hold
+ * Normal mode owns a coordination lease, one Discord IPC connection (fake
+ * endpoint) and executes `publish` / `clear` actions from the parent. It never
+ * ticks the publisher: recovery and takeover must come from the production
+ * timer.
+ *
+ * M0_MODE=locker holds `BEGIN IMMEDIATE` on the coordination DB until the
+ * parent creates the release file. It is a test process, not production code.
  */
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 
 import { loadSqliteBackend } from "../../src/m0/probe.js"
 import { Publisher } from "../../src/m0/publisher.js"
@@ -17,10 +21,10 @@ const runtimeDir = env.M0_RUNTIME
 const socketPath = env.M0_SOCKET
 const eventsFile = env.M0_EVENTS
 const actionFile = env.M0_ACTION
-const criticalFile = env.M0_CRITICAL_FILE
+const mode = env.M0_MODE ?? "publisher"
 
-if (!runtimeDir || !socketPath || !eventsFile || !actionFile) {
-  console.error("harness: missing M0_RUNTIME/M0_SOCKET/M0_EVENTS/M0_ACTION")
+if (!runtimeDir || !eventsFile) {
+  console.error("harness: missing M0_RUNTIME/M0_EVENTS")
   process.exit(2)
 }
 
@@ -32,16 +36,36 @@ function log(entry: Record<string, unknown>): void {
   }
 }
 
-const activity = buildActivity({ providerID: "opencode-go", id: "deepseek-v4.1-flash" }, 1_750_000_000)
-
 const { backend } = await loadSqliteBackend()
 if (!backend) {
   log({ kind: "fatal", reason: "no sqlite backend" })
   process.exit(3)
 }
 
+if (mode === "locker") {
+  const db = backend.open(`${runtimeDir}/publisher.sqlite`)
+  try {
+    db.exec("BEGIN IMMEDIATE")
+    writeFileSync(env.M0_LOCKED_FILE ?? `${runtimeDir}/locked`, `${Date.now()}\n`)
+    log({ kind: "locked" })
+    const release = env.M0_RELEASE_FILE ?? `${runtimeDir}/release`
+    while (!existsSync(release)) await new Promise((resolve) => setTimeout(resolve, 50))
+    db.exec("COMMIT")
+    log({ kind: "unlocked" })
+  } finally {
+    db.close()
+  }
+  process.exit(0)
+}
+
+if (!socketPath || !actionFile) {
+  console.error("harness: missing M0_SOCKET/M0_ACTION")
+  process.exit(2)
+}
+
+const activity = buildActivity({ providerID: "opencode-go", id: "deepseek-v4.1-flash" }, 1_750_000_000)
+
 let ipc: DiscordIpc | null = null
-const holdCriticalMs = Number(env.M0_HOLD_CRITICAL_MS ?? "0")
 
 const publisher = new Publisher({
   runtimeDir,
@@ -49,8 +73,15 @@ const publisher = new Publisher({
   heartbeatMs: 2000,
   staleMs: 10_000,
   tickMs: 500,
-  ...(holdCriticalMs > 0 ? { holdCriticalMs } : {}),
-  onEvent: (event) => log({ kind: "publisher", event: event.kind, fence: event.fence, previousFence: event.previousFence, reason: event.reason }),
+  onEvent: (event) =>
+    log({
+      kind: "publisher",
+      event: event.kind,
+      fence: event.fence,
+      previousFence: event.previousFence,
+      reason: event.reason,
+      code: event.code,
+    }),
   onRevoked: (reason) => {
     log({ kind: "revoked", reason })
     if (ipc) {
@@ -59,9 +90,6 @@ const publisher = new Publisher({
       ipc = null
     }
   },
-  onCriticalEnter: () => {
-    if (criticalFile) writeFileSync(criticalFile, `${Date.now()}\n`)
-  },
 })
 
 const acquisition = publisher.start()
@@ -69,6 +97,7 @@ log({
   kind: "start",
   status: acquisition.status,
   fence: "fence" in acquisition ? acquisition.fence : null,
+  code: acquisition.status === "error" ? acquisition.code : null,
   instanceId: publisher.identity.instanceId,
   generation: publisher.identity.generation,
 })
@@ -87,14 +116,6 @@ try {
 } catch (error) {
   log({ kind: "connect-failed", reason: error instanceof Error ? error.message : String(error) })
 }
-
-// Faster than the production 2 s tick so tests observe takeover promptly.
-const ticker = setInterval(() => {
-  const result = publisher.tick()
-  if (result && (result.status === "takeover" || result.status === "acquired" || result.status === "revoked")) {
-    log({ kind: "tick", status: result.status, fence: "fence" in result ? result.fence : null })
-  }
-}, 500)
 
 let executing = false
 let lastAction = ""
@@ -138,17 +159,11 @@ const actionTimer = setInterval(() => {
 }, 100)
 
 async function shutdown(signal: string): Promise<void> {
-  clearInterval(ticker)
   clearInterval(actionTimer)
   log({ kind: "shutdown", signal, fence: publisher.currentFence })
   ipc?.close()
   ipc = null
   publisher.stop()
-  try {
-    rmSync(criticalFile ?? "", { force: true })
-  } catch {
-    // Ignore.
-  }
   process.exit(0)
 }
 

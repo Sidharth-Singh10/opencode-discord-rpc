@@ -28,8 +28,9 @@ Add `"opencode-presence-discord"` to the `plugins` array in `cli.json`:
 ## Status
 
 Status: pre-alpha. M0 (packaged-host and transmission spike) is documented in
-[docs/M0.md](./docs/M0.md). Publishing to npm is still gated on the blocked
-remote-endpoint test and the user's visual Discord check.
+[docs/M0.md](./docs/M0.md). Remote integration is descoped from M0 and
+unverified; the human visual Discord check is still open. Nothing is published
+to npm.
 
 ## Discord assets
 

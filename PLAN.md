@@ -184,12 +184,22 @@ States: `working`, `thinking`, `typing`, `asking`, `compacting`, `retrying`,
 - `permission.*` and `form.created|replied|cancelled` → `asking` (protected).
 - `session.compaction.*` → `compacting` (protected, restores prior state).
 - `session.retry.scheduled` → `retrying`.
-- `session.status`, `session.idle` → `idle`.
+- `session.execution.succeeded|failed|interrupted` → terminal; confirm with an
+  authoritative session-state reconciliation.
+
+**Observed on OpenCode 2.3.0 (M0, sampled):** neither `data.listen` nor the
+reference `event.subscribe` stream delivered `session.idle` or `session.status`
+across 11 execution starts. Treat those events as optional corroboration, not
+as the terminal signal. M1 must detect terminals from
+`session.execution.succeeded|failed` (plus `interrupted`), reconcile against
+authoritative session state with generation guards, and keep protected states
+bounded with recovery rather than assuming an idle event will arrive.
 
 Protected states are bounded, not permanent: an authoritative reconciliation
-(session status / idle message) releases them, so one missed terminal event cannot
-pin the card forever. Generation counters stop stale polls overwriting live state.
-A watchdog fires only when no in-progress answer is visible.
+(session state / execution terminal / last message) releases them, so one missed
+terminal event cannot pin the card forever. Generation counters stop stale polls
+overwriting live state. A watchdog fires only when no in-progress answer is
+visible.
 
 Subscription is restartable: `AbortController` + monotonic token; clean end or
 error resubscribes with 1 s → 30 s backoff. `location.shutdown` does not clear
@@ -329,8 +339,10 @@ Current `package.json` reflects §2: `type: module`, `exports: {"./tui": "./dist
 4. Thin slice: events → state → `SET_ACTIVITY` with real `assets` and a real
    session-anchored timestamp, verified in a live Discord client.
 5. Two processes → exactly one publisher; fenced takeover after kill/suspend/resume.
-6. Remote-server case refuses enrichment and still renders from events.
-7. Publish `0.0.1` only after 1–6 pass.
+6. Remote-server integration is **descoped from M0** and remains unverified:
+   unknown identity refuses local-DB enrichment and continues events-only.
+   A genuine remote endpoint must be tested before remote support is claimed.
+7. Publish `0.0.1` only after the M1–M6 gates and the human visual check pass.
 
 Fallback if `node:net` is unavailable in the TUI host: `Bun.spawn` a socket-owning
 helper. Same package, one extra entrypoint.
@@ -375,7 +387,7 @@ manifest; `0.1.0` tag; optional footer indicator; Desktop GUI part deferred.
 | Risk | Mitigation |
 |---|---|
 | TUI host cannot open `node:net` | M0 test; fallback helper process |
-| Remote server / SSH without Discord | Scope statement; disconnected state; enrichment refusal |
+| Remote server / SSH without Discord | Scope statement; disconnected state; unknown identity refuses enrichment; genuine remote integration unverified until tested |
 | Unverifiable event semantics (ordering, replay) | Capture first; reconcile from authoritative session state |
 | Schema drift in `session_v2` / catalog key | Capability probe; known-era matrix; events-only fallback |
 | Discord asset keys immutable after upload | Freeze the key list before uploading (§15) |

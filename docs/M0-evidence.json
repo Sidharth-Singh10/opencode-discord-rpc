@@ -1,5 +1,10 @@
 {
   "milestone": "M0",
+  "gate": "NOT ACCEPTED",
+  "gateReasons": [
+    "human visual card check is open",
+    "remote integration is descoped from M0 and unverified"
+  ],
   "host": {
     "version": "2.3.0",
     "channel": "latest",
@@ -10,55 +15,36 @@
     "arch": "x64"
   },
   "imports": {
-    "node:net": {
-      "ok": true,
-      "createConnection": true
-    },
-    "bun:sqlite": {
-      "ok": true,
-      "selectOne": 1
-    },
-    "node:sqlite": {
-      "ok": true,
-      "selectOne": 1
-    }
+    "node:net": { "ok": true, "createConnection": true },
+    "bun:sqlite": { "ok": true, "selectOne": 1 },
+    "node:sqlite": { "ok": true, "selectOne": 1 }
   },
-  "sqlite": {
-    "usable": true,
-    "kind": "bun:sqlite"
+  "sqlite": { "usable": true, "kind": "bun:sqlite" },
+  "identity": {
+    "lastRun": { "class": "unknown", "enrichment": "refused", "reason": "identity-incomplete" },
+    "remote": { "status": "descoped", "integration": "unverified", "claimed": false }
   },
-  "locality": {
-    "class": "local",
-    "enrichment": "allowed"
-  },
-  "remoteTest": {
-    "status": "blocked",
-    "classification": "unknown",
-    "enrichment": "refused",
-    "reason": "No genuine authorized remote endpoint exists in this environment."
-  },
-  "reload": {
-    "reloadReranSetup": true,
-    "method": "/reload after editing cli.json live:true"
-  },
-  "snapshots": {
-    "count": 6,
-    "instances": 6,
-    "midTaskStatus": "running"
-  },
-  "capture": {
+  "reload": { "reloadReranSetup": true },
+  "snapshots": { "count": 7, "instances": 7, "midTaskStatus": "running" },
+  "coverage": {
     "listenTypes": 51,
-    "referenceTypes": 52,
-    "pairedEventIDs": 440,
-    "listenLines": 763,
-    "referenceLines": 769,
+    "referenceRealTypes": 51,
+    "distinctExecutionStartIDs": 8,
+    "executionStartRecords": 11,
+    "observerErrors": 2,
+    "pairedEventIDs": 691,
     "idleEventObserved": false,
     "statusEventObserved": false,
-    "locationShutdownObserved": 2,
-    "serverConnected": {
-      "listen": 2,
-      "reference": 6
-    }
+    "locationShutdownObserved": true,
+    "perInstance": [
+      { "instance": "15978cf5", "listenTypes": 41, "referenceTypes": 41, "paired": 384, "listenOnly": 0, "referenceOnly": 0 },
+      { "instance": "a6a025df", "listenTypes": 25, "referenceTypes": 26, "paired": 236, "listenOnly": 0, "referenceOnly": 1 },
+      { "instance": "c4cb14f7", "listenTypes": 10, "referenceTypes": 11, "paired": 10, "listenOnly": 0, "referenceOnly": 1 },
+      { "instance": "0d1c6d6e", "listenTypes": 10, "referenceTypes": 11, "paired": 10, "listenOnly": 0, "referenceOnly": 1 },
+      { "instance": "db3dfe4d", "listenTypes": 17, "referenceTypes": 18, "paired": 17, "listenOnly": 18, "referenceOnly": 1 },
+      { "instance": "d2c1f53b", "listenTypes": 17, "referenceTypes": 18, "paired": 17, "listenOnly": 18, "referenceOnly": 1 },
+      { "instance": "fe4045ee", "listenTypes": 16, "referenceTypes": 17, "paired": 17, "listenOnly": 0, "referenceOnly": 1 }
+    ]
   },
   "scenarios": {
     "startup mid-task snapshot": true,
@@ -69,155 +55,59 @@
     "permission wait and reply": true,
     "compaction start and end": true,
     "tool call": true,
-    "form observed": true,
+    "form observed and closed": true,
+    "location shutdown": true,
     "reconnect": true,
     "cleanup": true,
     "explicit disconnect": true,
-    "location shutdown": true
+    "reload re-ran setup": true
   },
-  "canaries": {
-    "categories": [
-      "prompt",
-      "tool",
-      "permission",
-      "error",
-      "form"
-    ],
-    "tokens": 5,
-    "filesScanned": 21,
-    "leaked": 0
-  },
+  "canaries": { "categories": ["prompt", "tool", "permission", "error", "form"], "tokens": 5, "filesScanned": 24, "leaked": 0 },
   "fences": {
-    "ownerChanges": 5,
-    "highest": 5,
-    "instances": 4,
-    "events": [
-      {
-        "fence": 1,
-        "kind": "acquire"
-      },
-      {
-        "fence": 1,
-        "kind": "release"
-      },
-      {
-        "fence": 2,
-        "kind": "acquire"
-      },
-      {
-        "fence": 2,
-        "kind": "release"
-      },
-      {
-        "fence": 3,
-        "kind": "acquire"
-      },
-      {
-        "fence": 4,
-        "kind": "takeover",
-        "previousFence": 3
-      },
-      {
-        "fence": 3,
-        "kind": "revoke",
-        "reason": "fence-changed"
-      },
-      {
-        "fence": 3,
-        "kind": "release"
-      },
-      {
-        "fence": 4,
-        "kind": "release"
-      },
-      {
-        "fence": 5,
-        "kind": "acquire"
-      },
-      {
-        "fence": 5,
-        "kind": "release"
-      }
-    ]
+    "highest": 6,
+    "ownerInstances": 5,
+    "intervals": 6,
+    "takeover": true,
+    "revocation": true,
+    "refusedClearAfterRevocation": true
   },
   "publication": {
-    "attempts": 29,
-    "successful": 5,
-    "refused": 8,
-    "timestampSessions": 1,
-    "timestampSeconds": 1794981213,
+    "attempts": 38,
+    "acknowledged": 7,
+    "sessions": 2,
     "clientId": "1572459187873783838",
     "payload": {
       "details": "M0 transmission test",
-      "state": "M0 \u00b7 events observed",
+      "state": "M0 · events observed",
       "assets": {
         "large_image": "state-working",
-        "large_text": "OpenCode \u2014 Working",
+        "large_text": "OpenCode — Working",
         "small_image": "badge-model",
         "small_text": "Model: opencode/deepseek-v4.1-flash-free"
       }
     },
-    "writes": [
-      {
-        "fence": 3,
-        "selector": "route",
-        "rpcAcknowledged": true,
-        "nonceMatched": true
-      },
-      {
-        "fence": 3,
-        "selector": "route",
-        "rpcAcknowledged": true,
-        "nonceMatched": true
-      },
-      {
-        "fence": 4,
-        "selector": "event",
-        "rpcAcknowledged": true,
-        "nonceMatched": true
-      },
-      {
-        "fence": 4,
-        "selector": "event",
-        "rpcAcknowledged": true,
-        "nonceMatched": true
-      },
-      {
-        "fence": 5,
-        "selector": "event",
-        "rpcAcknowledged": true,
-        "nonceMatched": true
-      }
-    ]
+    "anchors": [
+      { "session": "f3a45eaa", "seconds": 1794983809, "writes": 5 },
+      { "session": "edc969ab", "seconds": 1794983899, "writes": 2, "identity": "unknown" }
+    ],
+    "minimumRepublishGapSeconds": 9
   },
   "session": {
-    "selectedModel": {
-      "providerID": "opencode",
-      "id": "deepseek-v4.1-flash-free"
-    },
-    "executedModel": {
-      "providerID": "opencode",
-      "id": "deepseek-v4.1-flash-free",
-      "variant": "default"
-    },
+    "selectedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free" },
+    "executedModel": { "providerID": "opencode", "id": "deepseek-v4.1-flash-free", "variant": "default" },
     "agent": "build",
     "reportedCost": 0,
     "sessionCost": 0,
     "timestampSource": "session.message.list[].type=user.time.created",
     "timestampOriginalUnits": "milliseconds since Unix epoch",
-    "timestampConversion": "floor(ms / 1000)"
+    "timestampConversion": "floor(ms / 1000)",
+    "commitRule": "on non-ERROR acknowledgment only",
+    "anchorScope": "server-qualified session in the coordination DB"
   },
-  "evidenceValidator": {
-    "result": "PASS",
-    "failures": 0
-  },
+  "evidenceValidator": { "result": "PASS", "failures": 0, "negativeTests": 45 },
+  "tests": { "total": 77, "failed": 0 },
   "tarball": {
     "filename": "opencode-presence-discord-0.0.1.tgz",
-    "sha256": "59550800524204f989dc3871bec16fb8b315c71eae095790aa0eb7364584d970"
-  },
-  "gate": "BLOCKED",
-  "gateReasons": [
-    "remote endpoint not available; identity unknown and enrichment refused",
-    "visual Discord card check pending with the user"
-  ]
+    "sha256": "556d5951f163fd46202df8c40ff959f1af13cc6588824022d89ee36ae9dfb73b"
+  }
 }

@@ -3,7 +3,11 @@
 Discord Rich Presence for OpenCode V2, built from the strengths of three existing
 community plugins and none of their bugs.
 
-Status: **plan + scaffold**. No plugin code yet. Milestone M0 is the gate.
+Status: **plan + working release-development build**. This document describes the
+intended M0→M6 architecture; it is not a current status report. The implemented
+release path, its limits and its verification live in [README.md](./README.md) and
+[CHANGELOG.md](./CHANGELOG.md). M0 remains available through explicit
+`options.m0` and keeps its original evidence contract.
 
 ---
 

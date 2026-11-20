@@ -19,6 +19,7 @@ import { sanitizeActivity, sanitizeLocality, sanitizeProbe, sanitizePublication,
 import { Publisher, type Acquisition, type PublisherEvent } from "./m0/publisher.js"
 import { CLIENT_ID, buildActivity } from "./discord/presence.js"
 import { DiscordIpc } from "./discord/ipc.js"
+import { setupPresence } from "./core/presence.js"
 
 const PACKAGE_VERSION = "0.0.1"
 const PLUGIN_ID = "opencode-presence-discord"
@@ -163,7 +164,7 @@ function errorCode(error: unknown): PublicationCode {
   return "connect-failed"
 }
 
-export default Plugin.define({
+const m0Plugin = Plugin.define({
   id: PLUGIN_ID,
   async setup(context) {
     const runId = randomUUID()
@@ -726,5 +727,13 @@ export default Plugin.define({
         await log.close()
       }
     }
+  },
+})
+
+export default Plugin.define({
+  id: PLUGIN_ID,
+  setup(context) {
+    // Explicit M0 configuration retains the strict transmission-test contract.
+    return context.options?.m0 !== undefined ? m0Plugin.setup(context) : setupPresence(context)
   },
 })

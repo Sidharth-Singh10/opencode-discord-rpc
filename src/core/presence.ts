@@ -6,7 +6,7 @@ import { DiscordIpc } from "../discord/ipc.js"
 import { availableSockets } from "../discord/sockets.js"
 import { Publisher } from "../m0/publisher.js"
 import { inspectSession, loadSqliteBackend, type SessionInspection } from "../m0/probe.js"
-import { buildPresenceActivity, type PresenceMetrics } from "./activity.js"
+import { buildPresenceActivity, type BuiltActivity, type PresenceMetrics } from "./activity.js"
 import { reduceActivity, reconcileActivity, type ActivityState } from "./state.js"
 import { resolvePresenceOptions } from "./config.js"
 
@@ -103,6 +103,41 @@ function sessionMetrics(
   return { tokens, cost, contextPercent }
 }
 
+/**
+ * Rebuild a candidate payload with an explicit allowlist. Candidates are
+ * written only by this plugin, but the store is still treated as input.
+ */
+export function parseCandidate(payload: string): BuiltActivity | null {
+  try {
+    const value = JSON.parse(payload) as Record<string, unknown>
+    const assets = value.assets as Record<string, unknown> | undefined
+    const timestamps = value.timestamps as { start?: unknown } | undefined
+    const details = value.details
+    const state = value.state
+    if (typeof details !== "string" || details.length === 0 || details.length > 128) return null
+    if (typeof state !== "string" || state.length === 0 || state.length > 128) return null
+    if (!assets || typeof assets.large_image !== "string" || assets.large_image.length === 0 || assets.large_image.length > 64) return null
+    if (typeof assets.large_text !== "string" || assets.large_text.length > 128) return null
+    if (assets.small_image !== undefined && (typeof assets.small_image !== "string" || assets.small_image.length > 64)) return null
+    if (assets.small_text !== undefined && (typeof assets.small_text !== "string" || assets.small_text.length > 128)) return null
+    const start = timestamps?.start
+    if (!Number.isSafeInteger(start) || (start as number) < 1_000_000_000) return null
+    return {
+      details,
+      state,
+      assets: {
+        large_image: assets.large_image,
+        large_text: assets.large_text,
+        ...(typeof assets.small_image === "string" ? { small_image: assets.small_image } : {}),
+        ...(typeof assets.small_text === "string" ? { small_text: assets.small_text } : {}),
+      },
+      timestamps: { start: start as number },
+    }
+  } catch {
+    return null
+  }
+}
+
 /** Release path: no evidence capture, private metadata logs, or M0 model gate. */
 export async function setupPresence(context: Context): Promise<() => Promise<void>> {
   const options = resolvePresenceOptions(context.options ?? {})
@@ -175,22 +210,38 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
     const result = publisher.criticalEnqueue(() => connection.enqueueClearActivity(process.pid))
     if (result.ok) await settle(result.value.reply)
   }
-  try {
-    if (backend && enabled) {
-      const instanceId = randomUUID()
-      publisher = new Publisher({
+  const createPublisher = (): Publisher | null => {
+    if (!backend || !enabled) return null
+    try {
+      const instance = new Publisher({
         runtimeDir,
         backend,
-        identity: { instanceId, pid: process.pid, generation: randomUUID() },
-        onRevoked: () => { ipc?.close(); ipc = null; status = "Standby" },
+        identity: { instanceId: randomUUID(), pid: process.pid, generation: randomUUID() },
+        onRevoked: () => {
+          ipc?.close()
+          ipc = null
+          status = "Standby"
+        },
       })
-      publisher.start()
+      instance.start()
+      return instance
+    } catch {
+      return null
     }
-  } catch {
-    publisher?.stop()
-    publisher = null
-    status = "Coordination unavailable"
   }
+  const replacePublisher = (): Publisher | null => {
+    try { publisher?.removeCandidate() } catch { /* Store may already be gone. */ }
+    publisher?.stop()
+    publisher = createPublisher()
+    return publisher
+  }
+  const ensurePublisher = (): Publisher | null => {
+    if (!enabled || !backend) return null
+    if (publisher && !publisher.isRevoked) return publisher
+    return replacePublisher()
+  }
+  publisher = createPublisher()
+  if (!publisher && enabled) status = "Coordination unavailable"
 
   const diagnostics = (): string => {
     let sockets = 0
@@ -219,53 +270,81 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
       const cancelled = () => disposed || paused || generation !== revision
       if (cancelled()) return
       const selected = selectSession(context)
-      if (!selected) {
+      if (!selected) activeSessionID = null
+      else if (activeSessionID !== selected) {
+        activeSessionID = selected
+        activityState = { kind: "idle", at: 0 }
+        eventRevision += 1
+      }
+      const lease = ensurePublisher()
+      if (!lease) { status = "Coordination unavailable"; return }
+      const revisionAtRead = eventRevision
+
+      // Advertise this instance's card. Even a standby instance contributes a
+      // candidate; the fence owner publishes the best one.
+      if (selected) {
+        const key = namespace ? anchorKey(namespace, selected) : null
+        if (!key) { status = "Local server identity unavailable"; return }
+        const inspection = await inspectSession(context, selected, "release-no-evidence")
+        if (cancelled() || revisionAtRead !== eventRevision || !inspection.found) return
+        const anchors = lease.readAnchorState(key)
+        const anchor = anchors.acknowledgedUnpersisted ?? anchors.committed ?? anchors.pending
+        const seconds = anchor?.seconds ?? inspection.candidateTimestampSeconds
+        const sourceCreatedMs = anchor?.sourceCreatedMs ?? inspection.latestUserMessageAtMs
+        if (seconds === null || sourceCreatedMs === null) { status = "Session timestamp unavailable"; return }
+        // Read only the newest executed model; never substitute the prompt
+        // selection or an older supported assistant for an unknown execution.
+        const messages = context.data.session.message.list(selected)
+        const executed = [...messages].reverse().find((message) => message.type === "assistant")
+        const activity = buildPresenceActivity({
+          running: inspection.status === "running",
+          startSeconds: seconds,
+          model: executed?.type === "assistant" ? executed.model : null,
+          agent: executed?.type === "assistant" ? executed.agent : null,
+          project: projectName(context, selected),
+          metrics: sessionMetrics(context, selected, executed, inspection),
+          state: reconcileActivity(activityState, inspection.status === "running", Date.now()),
+          shareModel: options.shareModel,
+          shareAgent: options.shareAgent,
+          shareProject: options.shareProject,
+          shareMetrics: options.shareMetrics,
+        })
+        const updatedMs = context.data.session.get(selected)?.time?.updated
+        lease.upsertCandidate({
+          sessionKey: key,
+          priority: inspection.status === "running" ? 1 : 0,
+          updatedMs: typeof updatedMs === "number" && updatedMs > 0 ? updatedMs : Date.now(),
+          payload: JSON.stringify(activity),
+          seconds,
+          sourceCreatedMs,
+        })
+      } else {
+        lease.removeCandidate()
+      }
+      if (cancelled()) return
+
+      if (lease.isRevoked) { replacePublisher(); status = "Standby"; return }
+      if (lease.isPaused) lease.resume()
+      else if (!lease.isOwner) lease.tick()
+      if (!lease.isOwner) { status = "Standby"; return }
+
+      const best = lease.readCandidates()[0]
+      if (!best) {
         await clearOwned()
         ipc?.close()
         ipc = null
         lastPayload = null
         lastCard = null
-        publisher?.release()
-        activeSessionID = null
+        lease.release()
         status = "No active session"
         return
       }
-      if (activeSessionID !== selected) {
-        activeSessionID = selected
-        activityState = { kind: "idle", at: 0 }
-        eventRevision += 1
-      }
-      const key = namespace ? anchorKey(namespace, selected) : null
-      if (!key) { status = "Local server identity unavailable"; return }
-      if (!publisher) { status = "Coordination unavailable"; return }
-      if (publisher.isPaused) publisher.resume()
-      else if (!publisher.isOwner) publisher.tick()
-      if (!publisher.isOwner) { status = "Standby"; return }
-      const revisionAtRead = eventRevision
-      const inspection = await inspectSession(context, selected, "release-no-evidence")
-      if (cancelled() || revisionAtRead !== eventRevision || !inspection.found) return
-      const anchors = publisher.readAnchorState(key)
+      const activity = parseCandidate(best.payload)
+      if (!activity) { status = "Standby"; return }
+      const anchors = lease.readAnchorState(best.sessionKey)
       const anchor = anchors.acknowledgedUnpersisted ?? anchors.committed ?? anchors.pending
-      const seconds = anchor?.seconds ?? inspection.candidateTimestampSeconds
-      const sourceCreatedMs = anchor?.sourceCreatedMs ?? inspection.latestUserMessageAtMs
-      if (seconds === null || sourceCreatedMs === null) { status = "Session timestamp unavailable"; return }
-      // Read only the newest executed model; never substitute the prompt selection
-      // or an older supported assistant for an unknown execution.
-      const messages = context.data.session.message.list(selected)
-      const executed = [...messages].reverse().find((message) => message.type === "assistant")
-      const activity = buildPresenceActivity({
-        running: inspection.status === "running",
-        startSeconds: seconds,
-        model: executed?.type === "assistant" ? executed.model : null,
-        agent: executed?.type === "assistant" ? executed.agent : null,
-        project: projectName(context, selected),
-        metrics: sessionMetrics(context, selected, executed, inspection),
-        state: reconcileActivity(activityState, inspection.status === "running", Date.now()),
-        shareModel: options.shareModel,
-        shareAgent: options.shareAgent,
-        shareProject: options.shareProject,
-        shareMetrics: options.shareMetrics,
-      })
+      const seconds = anchor?.seconds ?? best.seconds
+      const sourceCreatedMs = anchor?.sourceCreatedMs ?? best.sourceCreatedMs
       const payload = JSON.stringify(activity)
       if (ipc?.isReady && lastPayload === payload) return
       if (Date.now() < nextAttemptAt) return
@@ -288,13 +367,14 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
           return
         }
       }
-      if (cancelled() || revisionAtRead !== eventRevision) return
-      // Selection can change while the socket connects; never publish a stale
-      // session that another terminal has since replaced.
-      if (selectSession(context) !== selected) return
+      if (cancelled()) return
+      // Another instance may have advertised a newer card while the socket
+      // connected. Only publish the candidate that is still the best.
+      const current = lease.readCandidates()[0]
+      if (!current || current.sessionKey !== best.sessionKey || current.payload !== best.payload) return
       const connection = ipc
       nextAttemptAt = Date.now() + 4_000
-      const result = publisher.criticalPublish(key, { seconds, sourceCreatedMs }, () =>
+      const result = lease.criticalPublish(best.sessionKey, { seconds, sourceCreatedMs }, () =>
         connection!.enqueueSetActivity(process.pid, activity as unknown as Record<string, unknown>))
       if (!result.ok) { status = "Standby"; return }
       let reply: { evt?: string | null }
@@ -311,7 +391,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
       }
       if (disposed) return
       if (reply.evt === "ERROR") { status = "Discord rejected update"; return }
-      publisher.markAcknowledged(key, seconds, sourceCreatedMs)
+      lease.markAcknowledged(best.sessionKey, seconds, sourceCreatedMs)
       failures = 0
       lastPayload = payload
       lastCard = { details: activity.details, state: activity.state }
@@ -328,6 +408,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
       } finally {
         ipc?.close()
         ipc = null
+        publisher?.removeCandidate()
         publisher?.release()
         lastPayload = null
         lastCard = null
@@ -360,6 +441,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
     } finally {
       if (timeout) clearTimeout(timeout)
       connection?.close()
+      try { publisher?.removeCandidate() } catch { /* Store may be gone. */ }
       publisher?.stop()
     }
   }

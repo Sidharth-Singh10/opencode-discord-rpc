@@ -97,12 +97,46 @@ export interface AnchorState {
   acknowledgedUnpersisted: { seconds: number; sourceCreatedMs: number } | null
 }
 
+export interface CandidateInput {
+  sessionKey: string
+  /** 1 when the session is running, 0 when idle. */
+  priority: number
+  updatedMs: number
+  /** Exact Discord activity payload, already privacy-reviewed. */
+  payload: string
+  seconds: number
+  sourceCreatedMs: number
+}
+
+export interface Candidate extends CandidateInput {
+  instanceId: string
+  pid: number
+  heartbeatMs: number
+}
+
 export type AnchorCommitResult =
   | { ok: true; stored: Anchor }
   | { ok: false; code: "anchor-conflict" | "anchor-persist-failed" }
 
 const OWNER_COLUMNS = "instance_id, pid, generation, fence, acquired_ms, heartbeat_ms"
 const SESSION_KEY = /^[0-9a-f]{64}$/
+const CANDIDATE_PAYLOAD_MAX = 4096
+
+function validCandidate(input: CandidateInput): boolean {
+  return (
+    SESSION_KEY.test(input.sessionKey) &&
+    (input.priority === 0 || input.priority === 1) &&
+    Number.isSafeInteger(input.updatedMs) &&
+    input.updatedMs > 0 &&
+    typeof input.payload === "string" &&
+    input.payload.length > 2 &&
+    input.payload.length <= CANDIDATE_PAYLOAD_MAX &&
+    Number.isSafeInteger(input.seconds) &&
+    input.seconds >= 1_000_000_000 &&
+    Number.isSafeInteger(input.sourceCreatedMs) &&
+    input.seconds === Math.floor(input.sourceCreatedMs / 1000)
+  )
+}
 
 export class Publisher {
   readonly identity: OwnerIdentity
@@ -375,6 +409,96 @@ export class Publisher {
   }
 
   /**
+   * Advertise this instance's current card. Every TUI writes one row; only the
+   * fence owner publishes the best fresh row, so the card follows activity in
+   * another workspace without giving that workspace a second socket.
+   */
+  upsertCandidate(input: CandidateInput): boolean {
+    if (!this.openStore() || !this.db) return false
+    if (!validCandidate(input)) return false
+    try {
+      this.db.run(
+        `INSERT INTO candidate (instance_id, pid, session_key, priority, updated_ms, heartbeat_ms, payload, seconds, source_created_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(instance_id) DO UPDATE SET
+           pid = excluded.pid,
+           session_key = excluded.session_key,
+           priority = excluded.priority,
+           updated_ms = excluded.updated_ms,
+           heartbeat_ms = excluded.heartbeat_ms,
+           payload = excluded.payload,
+           seconds = excluded.seconds,
+           source_created_ms = excluded.source_created_ms`,
+        this.identity.instanceId,
+        this.identity.pid,
+        input.sessionKey,
+        input.priority,
+        input.updatedMs,
+        this.options.now(),
+        input.payload,
+        input.seconds,
+        input.sourceCreatedMs,
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  removeCandidate(): boolean {
+    if (!this.openStore() || !this.db) return false
+    try {
+      this.db.run("DELETE FROM candidate WHERE instance_id = ?", this.identity.instanceId)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Fresh candidates only, best first. Stale rows are pruned. */
+  readCandidates(staleMs = this.options.staleMs): Candidate[] {
+    if (!this.openStore() || !this.db) return []
+    const cutoff = this.options.now() - staleMs
+    try {
+      this.db.run("DELETE FROM candidate WHERE heartbeat_ms < ?", cutoff)
+      const rows = this.db.all<{
+        instance_id: string
+        pid: number
+        session_key: string
+        priority: number
+        updated_ms: number
+        heartbeat_ms: number
+        payload: string
+        seconds: number
+        source_created_ms: number
+      }>(
+        `SELECT instance_id, pid, session_key, priority, updated_ms, heartbeat_ms, payload, seconds, source_created_ms
+         FROM candidate WHERE heartbeat_ms >= ?
+         ORDER BY priority DESC, updated_ms DESC, heartbeat_ms DESC`,
+        cutoff,
+      )
+      const candidates: Candidate[] = []
+      for (const row of rows) {
+        const candidate: Candidate = {
+          instanceId: row.instance_id,
+          pid: row.pid,
+          sessionKey: row.session_key,
+          priority: row.priority,
+          updatedMs: row.updated_ms,
+          heartbeatMs: row.heartbeat_ms,
+          payload: row.payload,
+          seconds: row.seconds,
+          sourceCreatedMs: row.source_created_ms,
+        }
+        if (validCandidate(candidate)) candidates.push(candidate)
+      }
+      return candidates
+    } catch {
+      return []
+    }
+  }
+
+  /**
    * Record an ACK first, then attempt durable reconciliation. A failed write
    * leaves the anchor in memory (and the durable pending intent) so no newer
    * anchor can be published; the ticker retries.
@@ -543,6 +667,17 @@ export class Publisher {
         seconds INTEGER NOT NULL,
         source_created_ms INTEGER NOT NULL,
         intent_ms INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS candidate (
+        instance_id TEXT PRIMARY KEY,
+        pid INTEGER NOT NULL,
+        session_key TEXT NOT NULL,
+        priority INTEGER NOT NULL,
+        updated_ms INTEGER NOT NULL,
+        heartbeat_ms INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        seconds INTEGER NOT NULL,
+        source_created_ms INTEGER NOT NULL
       );
     `)
     this.db.run("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)", "fence", "0")

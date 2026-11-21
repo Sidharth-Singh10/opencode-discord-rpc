@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import type { Context } from "@opencode/plugin/tui/plugin"
-import { anchorKey, presenceNamespace, setupPresence } from "../src/core/presence.js"
+import { anchorKey, parseCandidate, presenceNamespace, setupPresence } from "../src/core/presence.js"
 import { FakeDiscord } from "./fake-discord.js"
 
 const cleanups: Array<() => void | Promise<void>> = []
@@ -15,13 +16,21 @@ afterEach(async () => {
   else process.env.DISCORD_IPC_PATH = originalSocket
 })
 
-async function host(options: Record<string, unknown> = {}, discordOptions: Record<string, unknown> = {}) {
+async function host(
+  options: Record<string, unknown> = {},
+  discordOptions: Record<string, unknown> = {},
+  shared: { fake?: FakeDiscord; runtimeDir?: string; sessionID?: string } = {},
+) {
   const directory = mkdtempSync("/tmp/opencode/presence-")
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }))
-  const fake = new FakeDiscord({ path: join(directory, "discord.sock"), ...discordOptions })
-  await fake.start()
-  cleanups.push(() => fake.stop())
+  const fake = shared.fake ?? new FakeDiscord({ path: join(directory, "discord.sock"), ...discordOptions })
+  if (!shared.fake) {
+    await fake.start()
+    cleanups.push(() => fake.stop())
+  }
   process.env.DISCORD_IPC_PATH = fake.path
+  const runtimeDir = shared.runtimeDir ?? join(directory, "runtime")
+  const sessionID = shared.sessionID ?? "session"
   let run: (input: string) => Promise<void> = async () => {}
   let listener: ((event: unknown) => void) | null = null
   const state = {
@@ -41,13 +50,13 @@ async function host(options: Record<string, unknown> = {}, discordOptions: Recor
   }
   const toasts: string[] = []
   const context = {
-    options: { runtimeDir: join(directory, "runtime"), automatic: false, ...options },
+    options: { runtimeDir, automatic: false, ...options },
     client: { server: { info: async () => ({ hostname: hostname(), pid: process.pid, urls: state.urls }) } },
     data: {
       listen: (fn: (event: unknown) => void) => { listener = fn; return () => { listener = null } },
       session: {
       list: () => (state.sessions ?? []).map((session) => ({ id: session.id, time: { updated: session.updated } })),
-      get: (id?: string) => ({ id: id ?? "session", cost: state.cost, tokens: state.tokens ?? undefined, location: { directory: state.directory } }),
+      get: (id?: string) => ({ id: id ?? sessionID, cost: state.cost, tokens: state.tokens ?? undefined, location: { directory: state.directory } }),
       sync: async () => {},
       status: (id?: string) => state.sessions?.find((session) => session.id === id)?.status ?? state.status,
       cost: () => state.cost,
@@ -61,7 +70,7 @@ async function host(options: Record<string, unknown> = {}, discordOptions: Recor
     },
     location: { model: { list: () => state.models } } },
     ui: {
-      router: { current: () => state.home ? { type: "home" } : { type: "session", sessionID: "session" } },
+      router: { current: () => state.home ? { type: "home" } : { type: "session", sessionID } },
       model: { current: () => ({ modelID: "PRIVATE_SELECTED", providerID: "PRIVATE_PROVIDER" }) },
       toast: { show: ({ message }: { message: string }) => toasts.push(message) },
     },
@@ -69,8 +78,8 @@ async function host(options: Record<string, unknown> = {}, discordOptions: Recor
   } as unknown as Context
   const dispose = await setupPresence(context)
   cleanups.push(dispose)
-  return { fake, state, run: (input: string) => run(input), dispose, toasts,
-    emit: (type: string, sessionID = "session") => listener?.({ details: { type, data: { sessionID } } }),
+  return { fake, state, runtimeDir, run: (input: string) => run(input), dispose, toasts,
+    emit: (type: string, id = sessionID) => listener?.({ details: { type, data: { sessionID: id } } }),
   }
 }
 
@@ -94,6 +103,41 @@ describe("presence anchor namespace", () => {
     const fallback = await presenceNamespace(context(async () => { throw new Error("unavailable") }))
     expect(fallback).toMatch(/^[0-9a-f]{64}$/)
     expect(anchorKey(fallback, "ses_one")).not.toBe(anchorKey(fallback, "ses_two"))
+  })
+})
+
+describe("candidate payload parsing", () => {
+  const valid = {
+    details: "Working on demo",
+    state: "GPT-6.1 Sol · Working",
+    assets: { large_image: "state-working", large_text: "OpenCode", small_image: "badge-model", small_text: "Model: GPT-6.1 Sol" },
+    timestamps: { start: 1_790_000_000 },
+    extra: "PRIVATE",
+  }
+
+  test("rebuilds only known fields and drops unknown data", () => {
+    const parsed = parseCandidate(JSON.stringify(valid))
+    expect(parsed).toEqual({
+      details: valid.details,
+      state: valid.state,
+      assets: valid.assets,
+      timestamps: valid.timestamps,
+    })
+    expect(JSON.stringify(parsed)).not.toContain("PRIVATE")
+  })
+
+  test("rejects malformed, oversized or implausible payloads", () => {
+    for (const payload of [
+      "",
+      "not json",
+      "{}",
+      JSON.stringify({ ...valid, details: "x".repeat(129) }),
+      JSON.stringify({ ...valid, state: 1 }),
+      JSON.stringify({ ...valid, assets: { large_image: "x", large_text: 1 } }),
+      JSON.stringify({ ...valid, timestamps: { start: 1 } }),
+    ]) {
+      expect(parseCandidate(payload)).toBeNull()
+    }
   })
 })
 
@@ -266,4 +310,57 @@ describe("release presence publication", () => {
     expect(h.fake.activityFrames()[0]?.payload).not.toHaveProperty("args.activity.assets.small_text")
     expect(JSON.stringify(h.fake.frames)).not.toContain("PRIVATE")
   })
+
+  test("the owner publishes a running card from another workspace", async () => {
+    const sharedRoot = mkdtempSync("/tmp/opencode/presence-shared-")
+    cleanups.push(() => rmSync(sharedRoot, { recursive: true, force: true }))
+    const runtimeDir = join(sharedRoot, "runtime")
+    const a = await host({ shareProject: true, shareModel: true }, {}, { runtimeDir })
+    a.state.status = "idle"
+    a.state.directory = "/home/levi/project-a"
+    await a.run("publish")
+    expect(activity(a.fake)?.details).toBe("Working on project-a")
+
+    const b = await host({ shareProject: true, shareModel: true }, {}, { fake: a.fake, runtimeDir, sessionID: "session-b" })
+    b.state.status = "running"
+    b.state.directory = "/home/levi/project-b"
+    await b.run("publish")
+
+    // Presence updates are throttled to one attempt per four seconds.
+    await Bun.sleep(4_100)
+    await a.run("publish")
+    await a.fake.waitFor((frame) =>
+      (frame.payload as { args?: { activity?: { details?: string } } })?.args?.activity?.details === "Working on project-b", 6_000)
+    expect(a.fake.activityFrames().at(-1)?.payload).toHaveProperty("args.activity.details", "Working on project-b")
+    expect(a.fake.activityFrames().at(-1)?.payload).toHaveProperty("args.activity.state", "GPT-6.1 Sol · Working")
+
+    await b.dispose()
+    await Bun.sleep(4_100)
+    await a.run("publish")
+    await a.fake.waitFor((frame) =>
+      (frame.payload as { args?: { activity?: { details?: string } } })?.args?.activity?.details === "Working on project-a", 6_000)
+  }, 25_000)
+
+  test("a publisher that loses ownership recreates itself and recovers", async () => {
+    const h = await host({ automatic: true })
+    await h.fake.waitFor((frame) => (frame.payload as { cmd?: string })?.cmd === "SET_ACTIVITY")
+    const db = new Database(join(h.runtimeDir, "publisher.sqlite"))
+    try {
+      const owner = db.query("SELECT fence FROM owner").get() as { fence: number }
+      db.run(
+        "UPDATE owner SET instance_id = 'other', generation = 'other', fence = ?, heartbeat_ms = ? WHERE singleton = 1",
+        [owner.fence + 1, Date.now()],
+      )
+      await Bun.sleep(2_500)
+      expect((db.query("SELECT instance_id FROM owner").get() as { instance_id: string }).instance_id).toBe("other")
+      const before = h.fake.activityFrames().length
+      db.run("DELETE FROM owner")
+      const deadline = Date.now() + 8_000
+      while (h.fake.activityFrames().length <= before && Date.now() < deadline) await Bun.sleep(50)
+      expect(h.fake.activityFrames().length).toBeGreaterThan(before)
+      expect(h.fake.connections).toBeGreaterThanOrEqual(2)
+    } finally {
+      db.close()
+    }
+  }, 15_000)
 })

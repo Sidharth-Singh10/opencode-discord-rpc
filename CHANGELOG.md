@@ -9,6 +9,10 @@
 - Opt-in project name, agent, context %, cumulative tokens and reported cost in
   the card text; all off by default.
 - Presence no longer fails when the local server advertises tunnel/LAN URLs.
+- Fixed publisher recovery: a TUI that loses ownership now recreates its
+  publisher and can take over again instead of staying silent until reload.
+- Fixed cross-workspace presence: all TUIs advertise their current card in the
+  shared private store and the owner publishes the best running session.
 - `/presence status`, `/presence doctor`, `publish`, `pause` and `resume`.
 - Running-session selection across terminals on the local server; the foreground
   session is the fallback when nothing is running.

@@ -92,10 +92,12 @@ settings intact.
 - Local Linux desktop TUI only. A local TUI publishes even when the server
   advertises tunnel or LAN URLs; the anchor namespace is derived from the local
   server identity, not from URL reachability.
-- Automatic mode shows the running session from anywhere on the connected local
-  server, so work started in another TUI is reflected even when this terminal is
-  at home. When several sessions run at once, the most recently updated one is
-  shown; the result is deterministic and does not flap between terminals.
+- Automatic mode publishes the best fresh card across all TUIs on this machine.
+  Every TUI advertises its current card in the private coordination store; the
+  fence owner publishes the best running session, then the most recently updated
+  idle one. This works across workspaces without a second Discord socket.
+- If a TUI loses publisher ownership it discards that publisher and recreates it,
+  so it can take over again after the current owner exits or its lease goes stale.
 - Publisher fencing is reused from M0; a full multi-process suspend/resume
   acceptance run remains open.
 - Linux socket discovery includes slots 0–9, Snap, Flatpak and Vesktop layouts;
@@ -119,6 +121,11 @@ settings intact.
   clean packed-artifact release-mode acceptance are still pending.
 - Live OpenCode/Discord visual acceptance is required before a stable release.
   macOS, Windows and OpenCode GUI are not supported release targets yet.
+
+The private coordination store also holds each running TUI's current card
+payload so the owner can publish it. It contains only what would be sent to
+Discord, is created `0600` inside a `0700` runtime directory, is removed when the
+TUI pauses or exits, and stale rows are pruned after ten seconds.
 
 ## Legacy M0 transmission spike
 

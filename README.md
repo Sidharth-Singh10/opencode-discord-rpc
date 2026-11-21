@@ -94,8 +94,9 @@ settings intact.
   server identity, not from URL reachability.
 - Automatic mode publishes the best fresh card across all TUIs on this machine.
   Every TUI advertises its current card in the private coordination store; the
-  fence owner publishes the best running session, then the most recently updated
-  idle one. This works across workspaces without a second Discord socket.
+  fence owner publishes the best running session (recent local activity, then
+  session update time), then the newest idle one. This works across workspaces
+  without a second Discord socket.
 - If a TUI loses publisher ownership it discards that publisher and recreates it,
   so it can take over again after the current owner exits or its lease goes stale.
 - Publisher fencing is reused from M0; a full multi-process suspend/resume

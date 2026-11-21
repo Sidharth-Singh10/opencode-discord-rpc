@@ -45,6 +45,7 @@ async function host(
     directory: "/home/levi/project",
     tokens: null as null | { input: number; output: number; reasoning: number; cache: { read: number; write: number } },
     cost: 0,
+    updated: null as null | number,
     assistantTokens: null as null | { input: number; output: number; reasoning: number; cache: { read: number; write: number } },
     models: [] as Array<{ id: string; modelID: string; providerID: string; limit: { context: number } }>,
   }
@@ -56,7 +57,7 @@ async function host(
       listen: (fn: (event: unknown) => void) => { listener = fn; return () => { listener = null } },
       session: {
       list: () => (state.sessions ?? []).map((session) => ({ id: session.id, time: { updated: session.updated } })),
-      get: (id?: string) => ({ id: id ?? sessionID, cost: state.cost, tokens: state.tokens ?? undefined, location: { directory: state.directory } }),
+      get: (id?: string) => ({ id: id ?? sessionID, cost: state.cost, tokens: state.tokens ?? undefined, location: { directory: state.directory }, time: { updated: state.updated ?? state.created } }),
       sync: async () => {},
       status: (id?: string) => state.sessions?.find((session) => session.id === id)?.status ?? state.status,
       cost: () => state.cost,
@@ -340,6 +341,28 @@ describe("release presence publication", () => {
     await a.fake.waitFor((frame) =>
       (frame.payload as { args?: { activity?: { details?: string } } })?.args?.activity?.details === "Working on project-a", 6_000)
   }, 25_000)
+
+  test("between two running workspaces the newer activity wins", async () => {
+    const sharedRoot = mkdtempSync("/tmp/opencode/presence-shared-")
+    cleanups.push(() => rmSync(sharedRoot, { recursive: true, force: true }))
+    const runtimeDir = join(sharedRoot, "runtime")
+    const a = await host({ shareProject: true }, {}, { runtimeDir })
+    a.state.directory = "/home/levi/project-a"
+    a.state.status = "running"
+    a.state.updated = Date.now() - 60_000
+    await a.run("publish")
+
+    const b = await host({ shareProject: true }, {}, { fake: a.fake, runtimeDir, sessionID: "session-b" })
+    b.state.directory = "/home/levi/project-b"
+    b.state.status = "running"
+    b.state.updated = Date.now()
+    await b.run("publish")
+
+    await Bun.sleep(4_100)
+    await a.run("publish")
+    await a.fake.waitFor((frame) =>
+      (frame.payload as { args?: { activity?: { details?: string } } })?.args?.activity?.details === "Working on project-b", 6_000)
+  }, 20_000)
 
   test("a publisher that loses ownership recreates itself and recovers", async () => {
     const h = await host({ automatic: true })

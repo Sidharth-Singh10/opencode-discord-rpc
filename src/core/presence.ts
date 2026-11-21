@@ -157,6 +157,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
   let unsubscribe: (() => void) | null = null
   let activeSessionID: string | null = null
   let activityState: ActivityState = { kind: "idle", at: 0 }
+  let lastActivityMs = 0
   let eventRevision = 0
   let lastCard: { details: string; state: string } | null = null
   const namespace = enabled ? await presenceNamespace(context) : null
@@ -274,6 +275,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
       else if (activeSessionID !== selected) {
         activeSessionID = selected
         activityState = { kind: "idle", at: 0 }
+        lastActivityMs = 0
         eventRevision += 1
       }
       const lease = ensurePublisher()
@@ -313,7 +315,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
         lease.upsertCandidate({
           sessionKey: key,
           priority: inspection.status === "running" ? 1 : 0,
-          updatedMs: typeof updatedMs === "number" && updatedMs > 0 ? updatedMs : Date.now(),
+          updatedMs: Math.max(typeof updatedMs === "number" ? updatedMs : 0, lastActivityMs) || Date.now(),
           payload: JSON.stringify(activity),
           seconds,
           sourceCreatedMs,
@@ -491,6 +493,7 @@ export async function setupPresence(context: Context): Promise<() => Promise<voi
             tick()
             return
           }
+          lastActivityMs = Date.now()
           const next = reduceActivity(activityState, details.type, Date.now())
           if (next === activityState) return
           activityState = next
